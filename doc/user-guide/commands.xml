@@ -788,6 +788,22 @@
 		</description>
 	</bitlbee-setting>
 
+	<bitlbee-setting name="carbons" type="boolean" scope="account">
+		<default>true</default>
+
+		<description>
+			<para>
+				Jabber specific. "Message carbons" (XEP-0280) is a server feature to get copies of outgoing messages sent from other clients connected to the same account. It's not widely supported by most public XMPP servers (easier if you host your own), but this will probably change in the next few years.
+			</para>
+			<para>
+				This defaults to true, which will enable it if the server supports it, or fail silently if it's not. This setting only exists to allow disabling the feature if anyone considers it undesirable.
+			</para>
+			<para>
+				See also the <emphasis>self_messages</emphasis> setting.
+			</para>
+		</description>
+	</bitlbee-setting>
+
 	<bitlbee-setting name="charset" type="string" scope="global">
 		<default>utf-8</default>
 		<possible-values>you can get a list of all possible values by doing 'iconv -l' in a shell</possible-values>
@@ -1092,7 +1108,7 @@
 			</para>
 			
 			<para>
-				With modes "chat" and "many", you can send direct messages by /msg'ing your contacts directly. Note, however, that incoming DMs are not fetched yet.
+				With modes "chat" and "many", you can send direct messages by /msg'ing your contacts directly. Incoming DMs are only fetched if the "stream" setting is on (default).
 			</para>
 			
 			<para>
@@ -1157,7 +1173,7 @@
 
 		<description>
 			<para>
-				By default, BitlBee generates a nickname for every contact by taking its handle and chopping off everything after the @. In some cases, this gives very inconvenient nicknames. The Facebook XMPP server is a good example, as all Facebook XMPP handles are numeric.
+				By default, BitlBee generates a nickname for every contact by taking its handle and chopping off everything after the @. In some cases, this gives very inconvenient nicknames. Some servers use internal identifiers, which are often just numbers.
 			</para>
 
 			<para>
@@ -1171,7 +1187,7 @@
 
 		<description>
 			<para>
-				This enables OAuth authentication for an IM account; right now the Twitter (working for Twitter only) and Jabber (for Google Talk, Facebook and MSN Messenger) module support it.
+				This enables OAuth authentication for an IM account; right now the Twitter (working for Twitter only) and Jabber (for Google Talk only) module support it.
 			</para>
 
 			<para>
@@ -1413,11 +1429,23 @@
 			</para>
 
 			<para>
+				When this is set to "true", it will send those messages in the "standard" way, which is a PRIVMSG with source and target fields swapped.
+			</para>
+			
+			<para>
 				Since this isn't very well supported by some clients (the messages might appear in the wrong window), you can set it to "prefix" to show them as a normal message prefixed with "-> ", or use "prefix_notice" which is the same thing but with a NOTICE instead.
 			</para>
 
 			<para>
-				This setting only applies to private messages. Self messages in groupchats are always shown, since they don't cause problems.
+				You can also set it to "false" to disable these messages completely.
+			</para>
+
+			<para>
+				This setting only applies to private messages. Self messages in groupchats are always shown, since they haven't caused issues in any clients so far.
+			</para>
+
+			<para>
+				More information: <emphasis>https://wiki.bitlbee.org/SelfMessages</emphasis>
 			</para>
 		</description>
 	</bitlbee-setting>
@@ -1455,21 +1483,22 @@
 	</bitlbee-setting>
 
 	<bitlbee-setting name="show_users" type="string" scope="channel">
-		<default>online+,away</default>
+		<default>online+,special%,away</default>
 
 		<description>
 			<para>
 				Comma-separated list of statuses of users you want in the channel,
 				and any modes they should have. The following statuses are currently
 				recognised: <emphasis>online</emphasis> (i.e. available, not
-				away), <emphasis>away</emphasis>, and <emphasis>offline</emphasis>.
+				away), <emphasis>special</emphasis>, <emphasis>away</emphasis>,
+				and <emphasis>offline</emphasis>.
 			</para>
 			
 			<para>
 				If a status is followed by a valid channel mode character
 				(@, % or +), it will be given to users with that status.
-				For example, <emphasis>online@,away+,offline</emphasis> will
-				show all users in the channel. Online people will
+				For example, <emphasis>online@,special%,away+,offline</emphasis>
+				will show all users in the channel. Online people will
 				have +o, people who are online but away will have +v,
 				and others will have no special modes.
 			</para>

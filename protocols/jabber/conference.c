@@ -121,7 +121,10 @@ static xt_status jabber_chat_join_failed(struct im_connection *ic, struct xt_nod
 		jabber_error_free(err);
 	}
 	if (bud) {
-		jabber_chat_free(jabber_chat_by_jid(ic, bud->bare_jid));
+		struct groupchat *c = jabber_chat_by_jid(ic, bud->bare_jid);
+		if (c) {
+			jabber_chat_free(c);
+		}
 	}
 
 	return XT_HANDLED;
@@ -321,9 +324,6 @@ void jabber_chat_pkt_presence(struct im_connection *ic, struct jabber_buddy *bud
 						bud->ext_jid[i] = '_';
 					}
 				}
-
-				/* Some program-specific restrictions. */
-				imcb_clean_handle(ic, bud->ext_jid);
 			}
 			bud->flags |= JBFLAG_IS_ANONYMOUS;
 		}
@@ -462,12 +462,13 @@ void jabber_chat_pkt_message(struct im_connection *ic, struct jabber_buddy *bud,
 	}
 
 	if (subject && chat) {
-		char *subject_text = subject->text_len > 0 ? subject->text : NULL;
+		char *subject_text = subject->text_len > 0 ? subject->text : "";
 		if (g_strcmp0(chat->topic, subject_text) != 0) {
 			bare_jid = (bud) ? jabber_get_bare_jid(bud->ext_jid) : NULL;
 			imcb_chat_topic(chat, bare_jid, subject_text,
 			                jabber_get_timestamp(node));
 			g_free(bare_jid);
+			bare_jid = NULL;
 		}
 	}
 

@@ -83,9 +83,9 @@ static gboolean bee_irc_user_new(bee_t *bee, bee_user_t *bu)
 		}
 	}
 
-	while ((s = strchr(iu->user, ' '))) {
-		*s = '_';
-	}
+	/* Sanitize */
+	str_reject_chars(iu->user, " ", '_');
+	str_reject_chars(iu->host, " ", '_');
 
 	if (bu->flags & BEE_USER_LOCAL) {
 		char *s = set_getstr(&bee->set, "handle_unknown");
@@ -117,6 +117,12 @@ static gboolean bee_irc_user_status(bee_t *bee, bee_user_t *bu, bee_user_t *old)
 	iu->flags &= ~IRC_USER_AWAY;
 	if (bu->flags & BEE_USER_AWAY || !(bu->flags & BEE_USER_ONLINE)) {
 		iu->flags |= IRC_USER_AWAY;
+	}
+
+	if ((irc->caps & CAP_AWAY_NOTIFY) &&
+	    ((bu->flags & BEE_USER_AWAY) != (old->flags & BEE_USER_AWAY) ||
+	     (bu->flags & BEE_USER_ONLINE) != (old->flags & BEE_USER_ONLINE))) {
+		irc_send_away_notify(iu);
 	}
 
 	if ((bu->flags & BEE_USER_ONLINE) != (old->flags & BEE_USER_ONLINE)) {
@@ -876,14 +882,19 @@ static gboolean bee_irc_channel_chat_join(irc_channel_t *ic)
 	    acc->ic && (acc->ic->flags & OPT_LOGGED_IN) &&
 	    acc->prpl->chat_join) {
 		char *nick;
+		struct groupchat *gc;
 
 		if (!(nick = set_getstr(&ic->set, "nick"))) {
 			nick = ic->irc->user->nick;
 		}
 
 		ic->flags |= IRC_CHANNEL_CHAT_PICKME;
-		acc->prpl->chat_join(acc->ic, room, nick, NULL, &ic->set);
+		gc = acc->prpl->chat_join(acc->ic, room, nick, NULL, &ic->set);
 		ic->flags &= ~IRC_CHANNEL_CHAT_PICKME;
+
+		if (!gc) {
+			irc_send_num(ic->irc, 403, "%s :Error joining channel (check control channel?)", ic->name);
+		}
 
 		return FALSE;
 	} else {
@@ -900,8 +911,11 @@ static gboolean bee_irc_channel_chat_part(irc_channel_t *ic, const char *msg)
 		c->ic->acc->prpl->chat_leave(c);
 	}
 
-	/* Remove the reference. We don't need it anymore. */
-	ic->data = NULL;
+	if (!(ic->flags & IRC_CHANNEL_TEMP)) {
+		/* Remove the reference.
+		 * We only need it for temp channels that are being freed */
+		ic->data = NULL;
+	}
 
 	return TRUE;
 }
@@ -1094,6 +1108,13 @@ static void bee_irc_ft_finished(struct im_connection *ic, file_transfer_t *file)
 	}
 }
 
+static void bee_irc_log(bee_t *bee, const char *tag, const char *msg)
+{
+	irc_t *irc = (irc_t *) bee->ui_data;
+
+	irc_rootmsg(irc, "%s - %s", tag, msg);
+}
+
 const struct bee_ui_funcs irc_ui_funcs = {
 	bee_irc_imc_connected,
 	bee_irc_imc_disconnected,
@@ -1122,4 +1143,6 @@ const struct bee_ui_funcs irc_ui_funcs = {
 	bee_irc_ft_out_start,
 	bee_irc_ft_close,
 	bee_irc_ft_finished,
+
+	bee_irc_log,
 };

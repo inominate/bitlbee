@@ -440,7 +440,8 @@ char *otr_filter_msg_in(irc_user_t *iu, char *msg, int flags)
 	struct im_connection *ic = iu->bu->ic;
 
 	/* don't do OTR on certain (not classic IM) protocols, e.g. twitter */
-	if (ic->acc->prpl->options & OPT_NOOTR) {
+	if (ic->acc->prpl->options & OPT_NOOTR ||
+	    iu->bu->flags & BEE_USER_NOOTR) {
 		return msg;
 	}
 
@@ -478,7 +479,8 @@ char *otr_filter_msg_out(irc_user_t *iu, char *msg, int flags)
 	 */
 
 	/* don't do OTR on certain (not classic IM) protocols, e.g. twitter */
-	if (ic->acc->prpl->options & OPT_NOOTR) {
+	if (ic->acc->prpl->options & OPT_NOOTR ||
+	    iu->bu->flags & BEE_USER_NOOTR) {
 		return msg;
 	}
 
@@ -748,14 +750,9 @@ void op_create_instag(void *opdata, const char *account, const char *protocol)
 	}
 }
 
-static char *otr_filter_colors(char *msg) {
-	int i;
-	for (i = 0; msg[i]; i++) {
-		if (msg[i] == '\x03') {
-			msg[i] = '?';
-		}
-	}
-	return msg;
+static char *otr_filter_colors(char *msg)
+{
+	return str_reject_chars(msg, "\x02\x03", '?');
 }
 
 /* returns newly allocated string */
@@ -1397,8 +1394,8 @@ void display_otr_message(void *opdata, ConnContext *ctx, const char *fmt, ...)
 	va_end(va);
 
 	if (u) {
-		/* display as a notice from this particular user */
-		irc_usernotice(u, "%s", msg);
+		/* just show this as a regular message */
+		irc_usermsg(u, "<<\002OTR\002>> %s", msg);
 	} else {
 		irc_rootmsg(irc, "[otr] %s", msg);
 	}
@@ -1734,6 +1731,9 @@ OtrlPrivKey *match_privkey(irc_t *irc, const char **args)
 		}
 	}
 	*p = '\0';
+
+	/* remove trailing whitespace */
+	g_strchomp(prefix);
 
 	/* find first key which matches the given prefix */
 	n = strlen(prefix);
