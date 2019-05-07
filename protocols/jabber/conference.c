@@ -264,7 +264,7 @@ void jabber_chat_kick( struct groupchat *c, char *who, const char *message )
 
 	node = xt_new_node( "query", NULL, node );
 	xt_add_attr( node, "xmlns", XMLNS_MUC_ADMIN );
-	
+
 	node = jabber_make_packet( "iq", "set", jc->name, node );
 
 	jabber_write_packet( ic, node );

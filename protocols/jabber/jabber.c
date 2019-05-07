@@ -660,7 +660,6 @@ static void jabber_chat_kick_( struct groupchat *c, char *who, const char *msg )
 
 	if( c && who )
 		jabber_chat_kick( c, who, msg );
-	
 }
 
 static void jabber_keepalive(struct im_connection *ic)
