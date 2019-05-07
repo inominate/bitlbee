@@ -27,7 +27,8 @@
 static xt_status jabber_chat_join_failed(struct im_connection *ic, struct xt_node *node, struct xt_node *orig);
 static xt_status jabber_chat_self_message(struct im_connection *ic, struct xt_node *node, struct xt_node *orig);
 
-struct groupchat *jabber_chat_join(struct im_connection *ic, const char *room, const char *nick, const char *password)
+struct groupchat *jabber_chat_join(struct im_connection *ic, const char *room, const char *nick, const char *password,
+                                   gboolean always_use_nicks)
 {
 	struct jabber_chat *jc;
 	struct xt_node *node;
@@ -56,6 +57,10 @@ struct groupchat *jabber_chat_join(struct im_connection *ic, const char *room, c
 		g_free(jc->name);
 		g_free(jc);
 		return NULL;
+	}
+
+	if (always_use_nicks) {
+		jc->flags = JCFLAG_ALWAYS_USE_NICKS;
 	}
 
 	/* roomjid isn't normalized yet, and we need an original version
@@ -94,7 +99,7 @@ struct groupchat *jabber_chat_with(struct im_connection *ic, char *who)
 	g_free(uuid);
 	g_free(cserv);
 
-	c = jabber_chat_join(ic, rjid, jd->username, NULL);
+	c = jabber_chat_join(ic, rjid, jd->username, NULL, FALSE);
 	g_free(rjid);
 	if (c == NULL) {
 		return NULL;
@@ -161,6 +166,7 @@ void jabber_chat_free(struct groupchat *c)
 
 	jabber_buddy_remove_bare(c->ic, jc->name);
 
+	g_free(jc->last_sent_message);
 	g_free(jc->my_full_jid);
 	g_free(jc->name);
 	g_free(jc->invite);
@@ -181,6 +187,9 @@ int jabber_chat_msg(struct groupchat *c, char *message, int flags)
 	node = jabber_make_packet("message", "groupchat", jc->name, node);
 
 	jabber_cache_add(ic, node, jabber_chat_self_message);
+
+	g_free(jc->last_sent_message);
+	jc->last_sent_message = g_strdup(message);
 
 	return !jabber_write_packet(ic, node);
 }
@@ -263,6 +272,19 @@ void jabber_chat_kick( struct groupchat *c, char *who, const char *message )
 	xt_free_node( node );
 }
 
+static int jabber_chat_has_other_resources(struct im_connection *ic, struct jabber_buddy *bud)
+{
+	struct jabber_buddy *cur;
+
+	for (cur = jabber_buddy_by_jid(ic, bud->bare_jid, GET_BUDDY_FIRST); cur; cur = cur->next) {
+		if (cur != bud && jabber_compare_jid(cur->ext_jid, bud->ext_jid)) {
+			return TRUE;
+		}
+	}
+	
+	return FALSE;
+}
+
 /* Not really the same syntax as the normal pkt_ functions, but this isn't
    called by the xmltree parser directly and this way I can add some extra
    parameters so we won't have to repeat too many things done by the caller
@@ -326,6 +348,9 @@ void jabber_chat_pkt_presence(struct im_connection *ic, struct jabber_buddy *bud
 				}
 			}
 			bud->flags |= JBFLAG_IS_ANONYMOUS;
+		} else if (bud == jc->me) {
+			g_free(bud->ext_jid);
+			bud->ext_jid = g_strdup(jd->me);
 		}
 
 		if (bud != jc->me && bud->flags & JBFLAG_IS_ANONYMOUS) {
@@ -347,12 +372,18 @@ void jabber_chat_pkt_presence(struct im_connection *ic, struct jabber_buddy *bud
 		if (s) {
 			*s = 0; /* Should NEVER be NULL, but who knows... */
 		}
+
 		imcb_chat_add_buddy(chat, bud->ext_jid);
+
+		if (bud != jc->me && (jc->flags & JCFLAG_ALWAYS_USE_NICKS) && !(bud->flags & JBFLAG_IS_ANONYMOUS)) {
+			imcb_buddy_nick_change(ic, bud->ext_jid, bud->resource);
+		}
+
 		if (s) {
 			*s = '/';
 		}
 	} else if (type) { /* type can only be NULL or "unavailable" in this function */
-		if ((bud->flags & JBFLAG_IS_CHATROOM) && bud->ext_jid) {
+		if ((bud->flags & JBFLAG_IS_CHATROOM) && bud->ext_jid && !jabber_chat_has_other_resources(ic, bud)) {
 			char *reason = NULL;
 			char *status = NULL;
 			char *status_text = NULL;
@@ -462,7 +493,8 @@ void jabber_chat_pkt_message(struct im_connection *ic, struct jabber_buddy *bud,
 	}
 
 	if (subject && chat) {
-		char *subject_text = subject->text_len > 0 ? subject->text : "";
+		char empty[1] = "";
+		char *subject_text = subject->text_len > 0 ? subject->text : empty;
 		if (g_strcmp0(chat->topic, subject_text) != 0) {
 			bare_jid = (bud) ? jabber_get_bare_jid(bud->ext_jid) : NULL;
 			imcb_chat_topic(chat, bare_jid, subject_text,
@@ -489,16 +521,24 @@ void jabber_chat_pkt_message(struct im_connection *ic, struct jabber_buddy *bud,
 	} else if (chat != NULL && bud == NULL && nick == NULL) {
 		imcb_chat_log(chat, "From conference server: %s", body->text);
 		return;
-	} else if (jc && jc->flags & JCFLAG_MESSAGE_SENT && bud == jc->me &&
-		   (jabber_cache_handle_packet(ic, node) == XT_ABORT)) {
-		/* Self message marked by this bitlbee, don't show it */
-		return;
+	} else if (jc && jc->flags & JCFLAG_MESSAGE_SENT && bud == jc->me) {
+		if (jabber_cache_handle_packet(ic, node) == XT_ABORT) {
+			/* Self message marked by this bitlbee, don't show it */
+			return;
+		} else if (xt_find_attr(node, "id") == NULL &&
+		           g_strcmp0(body->text, jc->last_sent_message) == 0) {
+			/* Some misbehaving servers (like slack) eat the ids and echo anyway.
+			 * Try to detect those cases by comparing against the last sent message. */
+			return;
+		}
 	}
 
 	if (bud) {
 		bare_jid = jabber_get_bare_jid(bud->ext_jid ? bud->ext_jid : bud->full_jid);
 		final_from = bare_jid;
-		flags = (bud == jc->me) ? OPT_SELFMESSAGE : 0;
+		if (bud == jc->me || (g_strcasecmp(final_from, ic->acc->user) == 0)) {
+			flags = OPT_SELFMESSAGE;
+		}
 	} else {
 		final_from = nick;
 	}

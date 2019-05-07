@@ -25,6 +25,7 @@
 
 #define BITLBEE_CORE
 #include "bitlbee.h"
+#include "canohost.h"
 #include "help.h"
 #include "ipc.h"
 #include "base64.h"
@@ -56,6 +57,48 @@ static void irc_cmd_pass(irc_t *irc, char **cmd)
 		irc_setpass(irc, cmd[1]);
 		irc_check_login(irc);
 	}
+}
+
+/* http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
+
+   This isn't actually IRC, it's used by for example stunnel4 to indicate
+   the origin of the secured counterpart of the connection. It'll go wrong
+   with arguments starting with : like for example "::1" but I guess I'm
+   okay with that. */
+static void irc_cmd_proxy(irc_t *irc, char **cmd)
+{
+	struct addrinfo hints, *ai;
+	struct sockaddr_storage sock;
+	socklen_t socklen = sizeof(sock);
+
+	if (getpeername(irc->fd, (struct sockaddr*) &sock, &socklen) != 0) {
+		return;
+	}
+
+	ipv64_normalise_mapped(&sock, &socklen);
+
+	/* Only accept PROXY "command" on localhost sockets. */
+	if (!((sock.ss_family == AF_INET &&
+	       ntohl(((struct sockaddr_in*)&sock)->sin_addr.s_addr) == INADDR_LOOPBACK) ||
+	      (sock.ss_family == AF_INET6 &&
+	       IN6_IS_ADDR_LOOPBACK(&((struct sockaddr_in6*)&sock)->sin6_addr)))) {
+		return;
+	}
+
+	/* And only once. Do this with a pretty dumb regex-match for
+	   now, maybe better to use some sort of flag.. */
+	if (!g_regex_match_simple("^(ip6-)?localhost(.(localdomain.?)?)?$", irc->user->host, 0, 0)) {
+		return;
+	}
+	
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_flags = AI_NUMERICHOST;
+	if (getaddrinfo(cmd[2], NULL, &hints, &ai) != 0) {
+		return;
+	}
+	
+	irc_set_hosts(irc, ai->ai_addr, ai->ai_addrlen);
+	freeaddrinfo(ai);
 }
 
 static gboolean irc_sasl_plain_parse(char *input, char **user, char **pass)
@@ -96,13 +139,16 @@ static gboolean irc_sasl_check_pass(irc_t *irc, char *user, char *pass)
 
 	/* just check the password here to be able to reply with useful numerics
 	 * the actual identification will be handled later */
-	status = storage_check_pass(user, pass);
+	status = auth_check_pass(irc, user, pass);
 
 	if (status == STORAGE_OK) {
 		if (!irc->user->nick) {
 			/* set the nick here so we have it for the following numeric */
 			irc->user->nick = g_strdup(user);
 		}
+		irc_send_num(irc, 900, "%s!%s@%s %s :You are now logged in as %s",
+		             irc->user->nick, irc->user->user, irc->user->host,
+			     irc->user->nick, irc->user->nick);
 		irc_send_num(irc, 903, ":Password accepted");
 		return TRUE;
 
@@ -402,7 +448,9 @@ static void irc_cmd_who(irc_t *irc, char **cmd)
 	irc_user_t *iu;
 
 	if (!channel || *channel == '0' || *channel == '*' || !*channel) {
-		irc_send_who(irc, irc->users, "**");
+		GList *all_users = g_hash_table_get_values(irc->nick_user_hash);
+		irc_send_who(irc, (GSList *) all_users, "**");
+		g_list_free(all_users);
 	} else if ((ic = irc_channel_by_name(irc, channel))) {
 		irc_send_who(irc, ic->users, channel);
 	} else if ((iu = irc_user_by_name(irc, channel))) {
@@ -766,8 +814,8 @@ static void irc_cmd_list(irc_t *irc, char **cmd)
 
 static void irc_cmd_version(irc_t *irc, char **cmd)
 {
-	irc_send_num(irc, 351, "%s-%s. %s :%s/%s ",
-	             PACKAGE, BITLBEE_VERSION, irc->root->host, ARCH, CPU);
+	irc_send_num(irc, 351, "%s-%s. %s :",
+	             PACKAGE, BITLBEE_VERSION, irc->root->host);
 }
 
 static void irc_cmd_completions(irc_t *irc, char **cmd)
@@ -807,6 +855,7 @@ static void irc_cmd_rehash(irc_t *irc, char **cmd)
 static const command_t irc_commands[] = {
 	{ "cap",         1, irc_cmd_cap,         0 },
 	{ "pass",        1, irc_cmd_pass,        0 },
+	{ "proxy",       5, irc_cmd_proxy,       IRC_CMD_PRE_LOGIN },
 	{ "user",        4, irc_cmd_user,        IRC_CMD_PRE_LOGIN },
 	{ "nick",        1, irc_cmd_nick,        0 },
 	{ "quit",        0, irc_cmd_quit,        0 },

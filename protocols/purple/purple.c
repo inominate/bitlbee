@@ -30,6 +30,10 @@
 #include <glib.h>
 #include <purple.h>
 
+#if !PURPLE_VERSION_CHECK(2, 12, 0)
+#define PURPLE_MESSAGE_REMOTE_SEND 0x10000
+#endif
+
 GSList *purple_connections;
 
 /* This makes me VERY sad... :-( But some libpurple callbacks come in without
@@ -42,6 +46,8 @@ static char *set_eval_display_name(set_t *set, char *value);
 void purple_request_input_callback(guint id, struct im_connection *ic,
                                    const char *message, const char *who);
 
+void purple_transfer_cancel_all(struct im_connection *ic);
+
 /* purple_request_input specific stuff */
 typedef void (*ri_callback_t)(gpointer, const gchar *);
 
@@ -52,6 +58,13 @@ struct request_input_data {
 	char *buddy;
 	guint id;
 };
+
+struct purple_roomlist_data {
+	GSList *chats;
+	gint topic;
+	gboolean initialized;
+};
+
 
 struct im_connection *purple_ic_by_pa(PurpleAccount *pa)
 {
@@ -93,9 +106,33 @@ static gboolean purple_menu_cmp(const char *a, const char *b)
 	return (*a == '\0' && *b == '\0');
 }
 
+static gboolean purple_account_should_set_nick(account_t *acc)
+{
+	/* whitelist of protocols that tend to have numeric or meaningless usernames, and should
+	 * always offer the 'alias' as a nick.  this is just so that users don't have to do
+	 * 'account whatever set nick_format %full_name'
+	 */
+	char *whitelist[] = {
+		"prpl-hangouts",
+		"prpl-eionrobb-funyahoo-plusplus",
+		"prpl-line",
+		NULL,
+	};
+	char **p;
+
+	for (p = whitelist; *p; p++) {
+		if (g_strcmp0(acc->prpl->data, *p) == 0) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
 static void purple_init(account_t *acc)
 {
-	PurplePlugin *prpl = purple_plugins_find_with_id((char *) acc->prpl->data);
+	char *prpl_id = acc->prpl->data;
+	PurplePlugin *prpl = purple_plugins_find_with_id(prpl_id);
 	PurplePluginProtocolInfo *pi = prpl->info->extra_info;
 	PurpleAccount *pa;
 	GList *i, *st;
@@ -259,9 +296,14 @@ static void purple_init(account_t *acc)
 		s = set_add(&acc->set, "gg_sync_contacts", "true", set_eval_bool, acc);
 	}
 
+	if (g_strcmp0(prpl->info->id, "prpl-line") == 0) {
+		s = set_add(&acc->set, "line-auth-token", NULL, NULL, acc);
+		s->flags |= SET_HIDDEN;
+	}
+
 	/* Go through all away states to figure out if away/status messages
 	   are possible. */
-	pa = purple_account_new(acc->user, (char *) acc->prpl->data);
+	pa = purple_account_new(acc->user, prpl_id);
 	for (st = purple_account_get_status_types(pa); st; st = st->next) {
 		PurpleStatusPrimitive prim = purple_status_type_get_primitive(st->data);
 
@@ -317,6 +359,11 @@ static void purple_sync_settings(account_t *acc, PurpleAccount *pa)
 	if (pi->options & OPT_PROTO_MAIL_CHECK) {
 		purple_account_set_check_mail(pa, set_getbool(&acc->set, "mail_notifications"));
 	}
+
+	if (g_strcmp0(prpl->info->id, "prpl-line") == 0) {
+		const char *name = "line-auth-token";
+		purple_account_set_string(pa, name, set_getstr(&acc->set, name));
+	}
 }
 
 static void purple_login(account_t *acc)
@@ -339,12 +386,16 @@ static void purple_login(account_t *acc)
 	purple_connections = g_slist_prepend(purple_connections, ic);
 
 	ic->proto_data = pd = g_new0(struct purple_data, 1);
-	pd->account = purple_account_new(acc->user, (char *) acc->prpl->data);
+	pd->account = purple_account_new(acc->user, acc->prpl->data);
 	pd->input_requests = g_hash_table_new_full(g_direct_hash, g_direct_equal,
 	                                           NULL, g_free);
 	pd->next_request_id = 0;
 	purple_account_set_password(pd->account, acc->pass);
 	purple_sync_settings(acc, pd->account);
+
+	if (purple_account_should_set_nick(acc)) {
+		pd->flags = PURPLE_OPT_SHOULD_SET_NICK;
+	}
 
 	purple_account_set_enabled(pd->account, "BitlBee", TRUE);
 
@@ -365,9 +416,15 @@ static void purple_logout(struct im_connection *ic)
 		imcb_chat_free(ic->groupchats->data);
 	}
 
+	if (pd->filetransfers) {
+		purple_transfer_cancel_all(ic);
+	}
+
 	purple_account_set_enabled(pd->account, "BitlBee", FALSE);
 	purple_connections = g_slist_remove(purple_connections, ic);
 	purple_accounts_remove(pd->account);
+	imcb_chat_list_free(ic);
+	g_free(pd->chat_list_server);
 	g_hash_table_destroy(pd->input_requests);
 	g_free(pd);
 }
@@ -667,6 +724,21 @@ void purple_chat_invite(struct groupchat *gc, char *who, char *message)
 	                 who);
 }
 
+void purple_chat_set_topic(struct groupchat *gc, char *topic)
+{
+	PurpleConversation *pc = gc->data;
+	PurpleConvChat *pcc = PURPLE_CONV_CHAT(pc);
+	struct purple_data *pd = gc->ic->proto_data;
+	PurplePlugin *prpl = purple_plugins_find_with_id(pd->account->protocol_id);
+	PurplePluginProtocolInfo *pi = prpl->info->extra_info;
+
+	if (pi->set_chat_topic) {
+		pi->set_chat_topic(purple_account_get_connection(pd->account),
+		                   purple_conv_chat_get_id(pcc),
+		                   topic);
+	}
+}
+
 void purple_chat_kick(struct groupchat *gc, char *who, const char *message)
 {
 	PurpleConversation *pc = gc->data;
@@ -691,7 +763,9 @@ struct groupchat *purple_chat_join(struct im_connection *ic, const char *room, c
 	PurplePluginProtocolInfo *pi = prpl->info->extra_info;
 	GHashTable *chat_hash;
 	PurpleConversation *conv;
+	struct groupchat *gc;
 	GList *info, *l;
+	GString *missing_settings = NULL;
 
 	if (!pi->chat_info || !pi->chat_info_defaults ||
 	    !(info = pi->chat_info(purple_account_get_connection(pd->account)))) {
@@ -717,6 +791,28 @@ struct groupchat *purple_chat_join(struct im_connection *ic, const char *room, c
 			g_hash_table_replace(chat_hash, "password", g_strdup(password));
 		} else if (strcmp(pce->identifier, "passwd") == 0) {
 			g_hash_table_replace(chat_hash, "passwd", g_strdup(password));
+		} else {
+			char *key, *value;
+
+			key = g_strdup_printf("purple_%s", pce->identifier);
+			str_reject_chars(key, " -", '_');
+
+			if ((value = set_getstr(sets, key))) {
+				/* sync from bitlbee to the prpl */
+				g_hash_table_replace(chat_hash, (char *) pce->identifier, g_strdup(value));
+			} else if ((value = g_hash_table_lookup(chat_hash, pce->identifier))) {
+				/* if the bitlbee one was empty, sync from prpl to bitlbee */
+				set_setstr(sets, key, value);
+			}
+
+			g_free(key);
+		}
+
+		if (pce->required && !g_hash_table_lookup(chat_hash, pce->identifier)) {
+			if (!missing_settings) {
+				missing_settings = g_string_sized_new(32);
+			}
+			g_string_append_printf(missing_settings, "%s, ", pce->identifier);
 		}
 
 		g_free(pce);
@@ -724,11 +820,105 @@ struct groupchat *purple_chat_join(struct im_connection *ic, const char *room, c
 
 	g_list_free(info);
 
+	if (missing_settings) {
+		/* remove the ", " from the end */
+		g_string_truncate(missing_settings, missing_settings->len - 2);
+
+		imcb_error(ic, "Can't join %s. The following settings are required: %s", room, missing_settings->str);
+
+		g_string_free(missing_settings, TRUE);
+		g_hash_table_destroy(chat_hash);
+		return NULL;
+	}
+
+	/* do this before serv_join_chat to handle cases where prplcb_conv_new is called immediately (not async) */
+	gc = imcb_chat_new(ic, room);
+
 	serv_join_chat(purple_account_get_connection(pd->account), chat_hash);
 
 	g_hash_table_destroy(chat_hash);
 
-	return imcb_chat_new(ic, room);
+	return gc;
+}
+
+void purple_chat_list(struct im_connection *ic, const char *server)
+{
+	PurpleRoomlist *list;
+	struct purple_data *pd = ic->proto_data;
+	PurplePlugin *prpl = purple_plugins_find_with_id(pd->account->protocol_id);
+	PurplePluginProtocolInfo *pi = prpl->info->extra_info;
+
+	if (!pi || !pi->roomlist_get_list) {
+		imcb_log(ic, "Room listing unsupported by this purple plugin");
+		return;
+	}
+
+	g_free(pd->chat_list_server);
+	pd->chat_list_server = (server && *server) ? g_strdup(server) : NULL;
+
+	list = purple_roomlist_get_list(pd->account->gc);
+
+	if (list) {
+		struct purple_roomlist_data *rld = list->ui_data;
+		rld->initialized = TRUE;
+
+		purple_roomlist_ref(list);
+	}
+}
+
+/* handles either prpl->chat_(add|free)_settings depending on the value of 'add' */
+static void purple_chat_update_settings(account_t *acc, set_t **head, gboolean add)
+{
+	PurplePlugin *prpl = purple_plugins_find_with_id((char *) acc->prpl->data);
+	PurplePluginProtocolInfo *pi = prpl->info->extra_info;
+	GList *info, *l;
+
+	if (!pi->chat_info || !pi->chat_info_defaults) {
+		return;
+	}
+
+	/* hack / leap of faith: pass a NULL here because we don't have a connection yet.
+	 * i reviewed all the built-in prpls and a bunch of third-party ones and none
+	 * of them seem to need this parameter at all, so... i hope it never crashes */
+	info = pi->chat_info(NULL);
+
+	for (l = info; l; l = l->next) {
+		struct proto_chat_entry *pce = l->data;
+		char *key;
+
+		if (strcmp(pce->identifier, "handle") == 0 ||
+		    strcmp(pce->identifier, "password") == 0 ||
+		    strcmp(pce->identifier, "passwd") == 0) {
+			/* skip these, they are handled above */
+			g_free(pce);
+			continue;
+		}
+
+		key = g_strdup_printf("purple_%s", pce->identifier);
+		str_reject_chars(key, " -", '_');
+
+		if (add) {
+			set_add(head, key, NULL, NULL, NULL);
+		} else {
+			set_del(head, key);
+		}
+
+		g_free(key);
+		g_free(pce);
+	}
+
+	g_list_free(NULL);
+	g_list_free(info);
+}
+
+static void purple_chat_add_settings(account_t *acc, set_t **head)
+{
+	purple_chat_update_settings(acc, head, TRUE);
+}
+
+static void purple_chat_free_settings(account_t *acc, set_t **head)
+{
+	purple_chat_update_settings(acc, head, FALSE);
 }
 
 void purple_transfer_request(struct im_connection *ic, file_transfer_t *ft, char *handle);
@@ -767,7 +957,8 @@ static void prplcb_conn_progress(PurpleConnection *gc, const char *text, size_t 
 static void prplcb_conn_connected(PurpleConnection *gc)
 {
 	struct im_connection *ic = purple_ic_by_gc(gc);
-	const char *dn;
+	struct purple_data *pd = ic->proto_data;
+	const char *dn, *token;
 	set_t *s;
 
 	imcb_connected(ic);
@@ -780,6 +971,13 @@ static void prplcb_conn_connected(PurpleConnection *gc)
 
 	// user list needs to be requested for Gadu-Gadu
 	purple_gg_buddylist_import(gc);
+
+	/* more awful hacks, because clearly we didn't have enough of those */
+	if ((s = set_find(&ic->acc->set, "line-auth-token")) &&
+	    (token = purple_account_get_string(pd->account, "line-auth-token", NULL))) {
+		g_free(s->value);
+		s->value = g_strdup(token);
+	}
 
 	ic->flags |= OPT_DOES_HTML;
 }
@@ -831,17 +1029,22 @@ static void prplcb_blist_update(PurpleBuddyList *list, PurpleBlistNode *node)
 		PurpleBuddy *bud = (PurpleBuddy *) node;
 		PurpleGroup *group = purple_buddy_get_group(bud);
 		struct im_connection *ic = purple_ic_by_pa(bud->account);
+		struct purple_data *pd = ic->proto_data;
 		PurpleStatus *as;
 		int flags = 0;
+		char *alias = NULL;
 
 		if (ic == NULL) {
 			return;
 		}
 
-		if (bud->server_alias) {
-			imcb_rename_buddy(ic, bud->name, bud->server_alias);
-		} else if (bud->alias) {
-			imcb_rename_buddy(ic, bud->name, bud->alias);
+		alias = bud->server_alias ? : bud->alias;
+
+		if (alias) {
+			imcb_rename_buddy(ic, bud->name, alias);
+			if (pd->flags & PURPLE_OPT_SHOULD_SET_NICK) {
+				imcb_buddy_nick_change(ic, bud->name, alias);
+			}
 		}
 
 		if (group) {
@@ -964,10 +1167,11 @@ void prplcb_conv_del_users(PurpleConversation *conv, GList *cbuddies)
 }
 
 /* Generic handler for IM or chat messages, covers write_chat, write_im and write_conv */
-static void handle_conv_msg(PurpleConversation *conv, const char *who, const char *message, guint32 bee_flags, time_t mtime)
+static void handle_conv_msg(PurpleConversation *conv, const char *who, const char *message_, guint32 bee_flags, time_t mtime)
 {
 	struct im_connection *ic = purple_ic_by_pa(conv->account);
 	struct groupchat *gc = conv->ui_data;
+	char *message = g_strdup(message_);
 	PurpleBuddy *buddy;
 
 	buddy = purple_find_buddy(conv->account, who);
@@ -976,17 +1180,26 @@ static void handle_conv_msg(PurpleConversation *conv, const char *who, const cha
 	}
 
 	if (conv->type == PURPLE_CONV_TYPE_IM) {
-		imcb_buddy_msg(ic, (char *) who, (char *) message, bee_flags, mtime);
+		imcb_buddy_msg(ic, who, message, bee_flags, mtime);
 	} else if (gc) {
-		imcb_chat_msg(gc, who, (char *) message, bee_flags, mtime);
+		imcb_chat_msg(gc, who, message, bee_flags, mtime);
 	}
+
+	g_free(message);
 }
 
-/* Handles write_im and write_chat. Removes echoes of locally sent messages */
+/* Handles write_im and write_chat. Removes echoes of locally sent messages.
+ *
+ * PURPLE_MESSAGE_DELAYED is used for chat backlogs - if a message has both
+ * that flag and _SEND, it's a self-message from before joining the channel.
+ * Those are safe to display. The rest (with just _SEND) may be echoes. */
 static void prplcb_conv_msg(PurpleConversation *conv, const char *who, const char *message, PurpleMessageFlags flags, time_t mtime)
 {
-	if (!(flags & PURPLE_MESSAGE_SEND)) {
-		handle_conv_msg(conv, who, message, 0, mtime);
+	if ((!(flags & PURPLE_MESSAGE_SEND)) ||
+	    (flags & PURPLE_MESSAGE_DELAYED) ||
+	    (flags & PURPLE_MESSAGE_REMOTE_SEND)
+	) {
+		handle_conv_msg(conv, who, message, (flags & PURPLE_MESSAGE_SEND) ? OPT_SELFMESSAGE : 0, mtime);
 	}
 }
 
@@ -1165,8 +1378,19 @@ void* prplcb_request_input(const char *title, const char *primary,
 {
 	struct im_connection *ic = purple_ic_by_pa(account);
 	struct purple_data *pd = ic->proto_data;
-	struct request_input_data *ri = g_new0(struct request_input_data, 1);
-	guint id = pd->next_request_id++;
+	struct request_input_data *ri;
+	guint id;
+
+	/* hack so that jabber's chat list doesn't ask for conference server twice */
+	if (pd->chat_list_server && title && g_strcmp0(title, "Enter a Conference Server") == 0) {
+		((ri_callback_t) ok_cb)(user_data, pd->chat_list_server);
+		g_free(pd->chat_list_server);
+		pd->chat_list_server = NULL;
+		return NULL;
+	}
+
+	id = pd->next_request_id++;
+	ri = g_new0(struct request_input_data, 1);
 
 	ri->id = id;
 	ri->ic = ic;
@@ -1261,6 +1485,124 @@ static PurplePrivacyUiOps bee_privacy_uiops =
 	prplcb_privacy_permit_removed,     /* permit_removed */
 	prplcb_privacy_deny_added,         /* deny_added */
 	prplcb_privacy_deny_removed,       /* deny_removed */
+};
+
+static void prplcb_roomlist_create(PurpleRoomlist *list)
+{
+	struct purple_roomlist_data *rld;
+
+	list->ui_data = rld = g_new0(struct purple_roomlist_data, 1);
+	rld->topic = -1;
+}
+
+static void prplcb_roomlist_set_fields(PurpleRoomlist *list, GList *fields)
+{
+	gint topic = -1;
+	GList *l;
+	guint i;
+	PurpleRoomlistField *field;
+	struct purple_roomlist_data *rld = list->ui_data;
+
+	for (i = 0, l = fields; l; i++, l = l->next) {
+		field = l->data;
+
+		/* Use the first visible string field as a fallback topic */
+		if (i != 0 && topic < 0 && !field->hidden &&
+		    field->type == PURPLE_ROOMLIST_FIELD_STRING) {
+			topic = i;
+		}
+
+		if ((g_strcasecmp(field->name, "description") == 0) ||
+		    (g_strcasecmp(field->name, "topic") == 0)) {
+			if (field->type == PURPLE_ROOMLIST_FIELD_STRING) {
+				rld->topic = i;
+			}
+		}
+	}
+
+	if (rld->topic < 0) {
+		rld->topic = topic;
+	}
+}
+
+static char *prplcb_roomlist_get_room_name(PurpleRoomlist *list, PurpleRoomlistRoom *room)
+{
+	struct im_connection *ic = purple_ic_by_pa(list->account);
+	struct purple_data *pd = ic->proto_data;
+	PurplePlugin *prpl = purple_plugins_find_with_id(pd->account->protocol_id);
+	PurplePluginProtocolInfo *pi = prpl->info->extra_info;
+
+	if (pi && pi->roomlist_room_serialize) {
+		return pi->roomlist_room_serialize(room);
+	} else {
+		return g_strdup(purple_roomlist_room_get_name(room));
+	}
+}
+
+static void prplcb_roomlist_add_room(PurpleRoomlist *list, PurpleRoomlistRoom *room)
+{
+	bee_chat_info_t *ci;
+	char *title;
+	const char *topic;
+	GList *fields;
+	struct purple_roomlist_data *rld = list->ui_data;
+
+	fields = purple_roomlist_room_get_fields(room);
+	title = prplcb_roomlist_get_room_name(list, room);
+
+	if (rld->topic >= 0) {
+		topic = g_list_nth_data(fields, rld->topic);
+	} else {
+		topic = NULL;
+	}
+
+	ci = g_new(bee_chat_info_t, 1);
+	ci->title = title;
+	ci->topic = g_strdup(topic);
+	rld->chats = g_slist_prepend(rld->chats, ci);
+}
+
+static void prplcb_roomlist_in_progress(PurpleRoomlist *list, gboolean in_progress)
+{
+	struct im_connection *ic;
+	struct purple_data *pd;
+	struct purple_roomlist_data *rld = list->ui_data;
+
+	if (in_progress || !rld) {
+		return;
+	}
+
+	ic = purple_ic_by_pa(list->account);
+	imcb_chat_list_free(ic);
+
+	pd = ic->proto_data;
+	g_free(pd->chat_list_server);
+	pd->chat_list_server = NULL;
+
+	ic->chatlist = g_slist_reverse(rld->chats);
+	rld->chats = NULL;
+
+	imcb_chat_list_finish(ic);
+
+	if (rld->initialized) {
+		purple_roomlist_unref(list);
+	}
+}
+
+static void prplcb_roomlist_destroy(PurpleRoomlist *list)
+{
+	g_free(list->ui_data);
+	list->ui_data = NULL;
+}
+
+static PurpleRoomlistUiOps bee_roomlist_uiops =
+{
+	NULL,                         /* show_with_account */
+	prplcb_roomlist_create,       /* create */
+	prplcb_roomlist_set_fields,   /* set_fields */
+	prplcb_roomlist_add_room,     /* add_room */
+	prplcb_roomlist_in_progress,  /* in_progress */
+	prplcb_roomlist_destroy,      /* destroy */
 };
 
 static void prplcb_debug_print(PurpleDebugLevel level, const char *category, const char *arg_s)
@@ -1418,6 +1760,15 @@ static PurpleAccountUiOps bee_account_uiops =
 	NULL,                              /* close_account_request */
 };
 
+static void *prplcb_bitlbee_set_account_password(PurpleAccount *account, char *password)
+{
+	struct im_connection *ic = purple_ic_by_pa(account);
+
+	set_setstr(&ic->acc->set, "password", password ? password : "");
+
+	return GINT_TO_POINTER(TRUE);
+}
+
 extern PurpleXferUiOps bee_xfer_uiops;
 
 static void purple_ui_init()
@@ -1427,6 +1778,7 @@ static void purple_ui_init()
 	purple_conversations_set_ui_ops(&bee_conv_uiops);
 	purple_request_set_ui_ops(&bee_request_uiops);
 	purple_privacy_set_ui_ops(&bee_privacy_uiops);
+	purple_roomlist_set_ui_ops(&bee_roomlist_uiops);
 	purple_notify_set_ui_ops(&bee_notify_uiops);
 	purple_accounts_set_ui_ops(&bee_account_uiops);
 	purple_xfers_set_ui_ops(&bee_xfer_uiops);
@@ -1436,21 +1788,36 @@ static void purple_ui_init()
 	}
 }
 
+/* borrowing this semi-private function
+ * TODO: figure out a better interface later (famous last words) */
+gboolean plugin_info_add(struct plugin_info *info);
+
 void purple_initmodule()
 {
 	struct prpl funcs;
 	GList *prots;
 	GString *help;
 	char *dir;
+	gboolean debug_enabled = !!getenv("BITLBEE_DEBUG");
 
-	g_assert((int) B_EV_IO_READ == (int) PURPLE_INPUT_READ);
-	g_assert((int) B_EV_IO_WRITE == (int) PURPLE_INPUT_WRITE);
+	if (purple_get_core() != NULL) {
+		log_message(LOGLVL_ERROR, "libpurple already initialized. "
+		            "Please use inetd or ForkDaemon mode instead.");
+		return;
+	}
+
+	g_return_if_fail((int) B_EV_IO_READ == (int) PURPLE_INPUT_READ);
+	g_return_if_fail((int) B_EV_IO_WRITE == (int) PURPLE_INPUT_WRITE);
 
 	dir = g_strdup_printf("%s/purple", global.conf->configdir);
 	purple_util_set_user_dir(dir);
 	g_free(dir);
 
-	purple_debug_set_enabled(FALSE);
+	dir = g_strdup_printf("%s/purple", global.conf->plugindir);
+	purple_plugins_add_search_path(dir);
+	g_free(dir);
+
+	purple_debug_set_enabled(debug_enabled);
 	purple_core_set_ui_ops(&bee_core_uiops);
 	purple_eventloop_set_ui_ops(&glib_eventloops);
 	if (!purple_core_init("BitlBee")) {
@@ -1458,6 +1825,7 @@ void purple_initmodule()
 		fprintf(stderr, "libpurple initialization failed.\n");
 		abort();
 	}
+	purple_debug_set_enabled(FALSE);
 
 	if (proxytype != PROXY_NONE) {
 		PurpleProxyInfo *pi = purple_global_proxy_get_info();
@@ -1490,6 +1858,28 @@ void purple_initmodule()
 	purple_signal_connect(purple_conversations_get_handle(), "buddy-typing-stopped",
 	                      &funcs, PURPLE_CALLBACK(prplcb_buddy_typing), NULL);
 
+	/* "bitlbee-set-account-password" signal:
+	 * Replacement API for purple_account_set_password() to be called by
+	 * prpls that wish to store updated passwords or oauth tokens, since
+	 * our password storage doesn't get notified of calls to
+	 * purple_account_set_password().
+	 *
+	 * When used with purple_signal_emit_return_1() returns:
+	 *  - GINT_TO_POINTER(TRUE) if implemented by this version of bitlbee
+	 *  - NULL otherwise.
+	 *
+	 * Originally made for the hangouts plugin.
+	 */
+
+	purple_signal_register(purple_accounts_get_handle(), "bitlbee-set-account-password",
+	                       purple_marshal_POINTER__POINTER_POINTER,
+	                       purple_value_new(PURPLE_TYPE_BOOLEAN), 2,
+	                       purple_value_new(PURPLE_TYPE_SUBTYPE, PURPLE_SUBTYPE_ACCOUNT),
+	                       purple_value_new(PURPLE_TYPE_STRING));
+
+	purple_signal_connect(purple_accounts_get_handle(), "bitlbee-set-account-password",
+	                      &funcs, PURPLE_CALLBACK(prplcb_bitlbee_set_account_password), NULL);
+
 	memset(&funcs, 0, sizeof(funcs));
 	funcs.login = purple_login;
 	funcs.init = purple_init;
@@ -1511,9 +1901,13 @@ void purple_initmodule()
 	funcs.chat_msg = purple_chat_msg;
 	funcs.chat_with = purple_chat_with;
 	funcs.chat_invite = purple_chat_invite;
+	funcs.chat_topic = purple_chat_set_topic;
 	funcs.chat_kick = purple_chat_kick;
 	funcs.chat_leave = purple_chat_leave;
 	funcs.chat_join = purple_chat_join;
+	funcs.chat_list = purple_chat_list;
+	funcs.chat_add_settings = purple_chat_add_settings;
+	funcs.chat_free_settings = purple_chat_free_settings;
 	funcs.transfer_request = purple_transfer_request;
 
 	help = g_string_new("BitlBee libpurple module supports the following IM protocols:\n");
@@ -1522,7 +1916,9 @@ void purple_initmodule()
 	   supported by this libpurple instance. */
 	for (prots = purple_plugins_get_protocols(); prots; prots = prots->next) {
 		PurplePlugin *prot = prots->data;
+		PurplePluginProtocolInfo *pi = prot->info->extra_info;
 		struct prpl *ret;
+		struct plugin_info *info;
 
 		/* If we already have this one (as a native module), don't
 		   add a libpurple duplicate. */
@@ -1535,18 +1931,28 @@ void purple_initmodule()
 		if (strncmp(ret->name, "prpl-", 5) == 0) {
 			ret->name += 5;
 		}
+
+		if (pi->options & OPT_PROTO_NO_PASSWORD) {
+			ret->options |= PRPL_OPT_NO_PASSWORD;
+		}
+
+		if (pi->options & OPT_PROTO_PASSWORD_OPTIONAL) {
+			ret->options |= PRPL_OPT_PASSWORD_OPTIONAL;
+		}
+
 		register_protocol(ret);
 
 		g_string_append_printf(help, "\n* %s (%s)", ret->name, prot->info->name);
 
-		/* libpurple doesn't define a protocol called OSCAR, but we
-		   need it to be compatible with normal BitlBee. */
-		if (g_strcasecmp(prot->info->id, "prpl-aim") == 0) {
-			ret = g_memdup(&funcs, sizeof(funcs));
-			ret->name = "oscar";
-			ret->data = prot->info->id;
-			register_protocol(ret);
-		}
+		info = g_new0(struct plugin_info, 1);
+		info->abiver = BITLBEE_ABI_VERSION_CODE;
+		info->name = ret->name;
+		info->version = prot->info->version;
+		info->description = prot->info->description;
+		info->author = prot->info->author;
+		info->url = prot->info->homepage;
+
+		plugin_info_add(info);
 	}
 
 	g_string_append(help, "\n\nFor used protocols, more information about available "

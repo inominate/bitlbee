@@ -42,6 +42,7 @@ static const cap_info_t supported_caps[] = {
 	{"extended-join", CAP_EXTENDED_JOIN},
 	{"away-notify", CAP_AWAY_NOTIFY},
 	{"userhost-in-names", CAP_USERHOST_IN_NAMES},
+	{"server-time", CAP_SERVER_TIME},
 	{NULL},
 };
 
@@ -176,6 +177,9 @@ void irc_cmd_cap(irc_t *irc, char **cmd)
 		irc_send_cap(irc, ack ? "ACK" : "NAK", cmd[2] ? : "");
 
 	} else if (g_strcasecmp(cmd[1], "END") == 0) {
+		if (!(irc->status & USTATUS_CAP_PENDING)) {
+			return;
+		}
 		irc->status &= ~USTATUS_CAP_PENDING;
 
 		if (irc->status & USTATUS_SASL_PLAIN_PENDING) {

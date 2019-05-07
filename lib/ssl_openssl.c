@@ -64,10 +64,17 @@ void ssl_init(void)
 {
 	const SSL_METHOD *meth;
 
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 	SSL_library_init();
 
-	meth = TLSv1_client_method();
+	meth = SSLv23_client_method();
 	ssl_ctx = SSL_CTX_new(meth);
+	SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
+#else
+	meth = TLS_client_method();
+	ssl_ctx = SSL_CTX_new(meth);
+	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_VERSION);
+#endif
 
 	initialized = TRUE;
 }
@@ -159,7 +166,7 @@ static gboolean ssl_connected(gpointer data, gint source, b_input_condition cond
 	sock_make_nonblocking(conn->fd);
 	SSL_set_fd(conn->ssl, conn->fd);
 
-	if (conn->hostname && !g_ascii_isdigit(conn->hostname[0])) {
+	if (conn->hostname && !g_hostname_is_ip_address(conn->hostname)) {
 		SSL_set_tlsext_host_name(conn->ssl, conn->hostname);
 	}
 
@@ -299,20 +306,20 @@ size_t ssl_des3_encrypt(const unsigned char *key, size_t key_len, const unsigned
                         const unsigned char *iv, unsigned char **res)
 {
 	int output_length = 0;
-	EVP_CIPHER_CTX ctx;
+	EVP_CIPHER_CTX *ctx;
 
 	*res = g_new0(unsigned char, 72);
 
 	/* Don't set key or IV because we will modify the parameters */
-	EVP_CIPHER_CTX_init(&ctx);
-	EVP_CipherInit_ex(&ctx, EVP_des_ede3_cbc(), NULL, NULL, NULL, 1);
-	EVP_CIPHER_CTX_set_key_length(&ctx, key_len);
-	EVP_CIPHER_CTX_set_padding(&ctx, 0);
+	ctx = EVP_CIPHER_CTX_new();
+	EVP_CipherInit_ex(ctx, EVP_des_ede3_cbc(), NULL, NULL, NULL, 1);
+	EVP_CIPHER_CTX_set_key_length(ctx, key_len);
+	EVP_CIPHER_CTX_set_padding(ctx, 0);
 	/* We finished modifying parameters so now we can set key and IV */
-	EVP_CipherInit_ex(&ctx, NULL, NULL, key, iv, 1);
-	EVP_CipherUpdate(&ctx, *res, &output_length, input, input_len);
-	EVP_CipherFinal_ex(&ctx, *res, &output_length);
-	EVP_CIPHER_CTX_cleanup(&ctx);
+	EVP_CipherInit_ex(ctx, NULL, NULL, key, iv, 1);
+	EVP_CipherUpdate(ctx, *res, &output_length, input, input_len);
+	EVP_CipherFinal_ex(ctx, *res, &output_length);
+	EVP_CIPHER_CTX_free(ctx);
 	//EVP_cleanup();
 
 	return output_length;

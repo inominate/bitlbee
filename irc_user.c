@@ -36,11 +36,7 @@ irc_user_t *irc_user_new(irc_t *irc, const char *nick)
 
 	iu->key = g_strdup(nick);
 	nick_lc(irc, iu->key);
-	/* Using the hash table for speed and irc->users for easy iteration
-	   through the list (since the GLib API doesn't have anything sane
-	   for that.) */
 	g_hash_table_insert(irc->nick_user_hash, iu->key, iu);
-	irc->users = g_slist_insert_sorted(irc->users, iu, irc_user_cmp);
 
 	return iu;
 }
@@ -86,7 +82,6 @@ int irc_user_free(irc_t *irc, irc_user_t *iu)
 	}
 	irc_user_quit(iu, msg);
 
-	irc->users = g_slist_remove(irc->users, iu);
 	g_hash_table_remove(irc->nick_user_hash, iu->key);
 
 	g_free(iu->nick);
@@ -147,7 +142,6 @@ int irc_user_set_nick(irc_user_t *iu, const char *new)
 		}
 	}
 
-	irc->users = g_slist_remove(irc->users, iu);
 	g_hash_table_remove(irc->nick_user_hash, iu->key);
 
 	if (iu->nick == iu->user) {
@@ -174,7 +168,6 @@ int irc_user_set_nick(irc_user_t *iu, const char *new)
 	g_free(iu->key);
 	iu->key = g_strdup(key);
 	g_hash_table_insert(irc->nick_user_hash, iu->key, iu);
-	irc->users = g_slist_insert_sorted(irc->users, iu, irc_user_cmp);
 
 	if (iu == irc->user) {
 		ipc_to_master_str("NICK :%s\r\n", new);
@@ -250,7 +243,7 @@ static gboolean root_ctcp(irc_user_t *iu, char * const *ctcp)
 {
 	if (g_strcasecmp(ctcp[0], "VERSION") == 0) {
 		irc_send_msg_f(iu, "NOTICE", iu->irc->user->nick, "\001%s %s\001",
-		               ctcp[0], PACKAGE " " BITLBEE_VERSION " " ARCH "/" CPU);
+		               ctcp[0], PACKAGE " " BITLBEE_VERSION);
 	} else if (g_strcasecmp(ctcp[0], "PING") == 0) {
 		irc_send_msg_f(iu, "NOTICE", iu->irc->user->nick, "\001%s %s\001",
 		               ctcp[0], ctcp[1] ? : "");

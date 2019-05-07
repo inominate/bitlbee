@@ -120,7 +120,8 @@ irc_channel_t *irc_channel_get(irc_t *irc, char *id)
 int irc_channel_free(irc_channel_t *ic)
 {
 	irc_t *irc;
-	GSList *l;
+	GHashTableIter iter;
+	gpointer itervalue;
 
 	if (ic == NULL) {
 		return 0;
@@ -145,8 +146,10 @@ int irc_channel_free(irc_channel_t *ic)
 		ic->users = g_slist_remove(ic->users, ic->users->data);
 	}
 
-	for (l = irc->users; l; l = l->next) {
-		irc_user_t *iu = l->data;
+	g_hash_table_iter_init(&iter, irc->nick_user_hash);
+
+	while (g_hash_table_iter_next(&iter, NULL, &itervalue)) {
+		irc_user_t *iu = itervalue;
 
 		if (iu->last_channel == ic) {
 			iu->last_channel = irc->default_channel;
@@ -244,7 +247,9 @@ int irc_channel_add_user(irc_channel_t *ic, irc_user_t *iu)
 
 	ic->users = g_slist_insert_sorted(ic->users, icu, irc_channel_user_cmp);
 
-	irc_channel_update_ops(ic, set_getstr(&ic->irc->b->set, "ops"));
+	if (iu == ic->irc->user || iu == ic->irc->root) {
+		irc_channel_update_ops(ic, set_getstr(&ic->irc->b->set, "ops"));
+	}
 
 	if (iu == ic->irc->user || ic->flags & IRC_CHANNEL_JOINED) {
 		ic->flags |= IRC_CHANNEL_JOINED;
@@ -635,7 +640,7 @@ char *irc_channel_name_gen(irc_t *irc, const char *hint)
 
 	irc_channel_name_strip(name);
 
-	if (set_getbool(&irc->b->set, "lcnicks")) {
+	if (set_getbool(&irc->b->set, "nick_lowercase")) {
 		nick_lc(irc, name + 1);
 	}
 
@@ -726,7 +731,7 @@ static gboolean control_channel_privmsg(irc_channel_t *ic, const char *msg)
 			ic->last_target = iu;
 		}
 	} else if (g_strcasecmp(set_getstr(&irc->b->set, "default_target"), "last") == 0 &&
-	           ic->last_target && g_slist_find(irc->users, ic->last_target)) {
+	           ic->last_target && g_hash_table_contains(irc->nick_user_hash, ic->last_target->key)) {
 		iu = ic->last_target;
 	} else {
 		iu = irc->root;

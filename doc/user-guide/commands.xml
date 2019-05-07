@@ -20,7 +20,7 @@
 
 			<description>
 				<para>
-					Adds an account on the given server with the specified protocol, username and password to the account list. Supported protocols right now are: Jabber, MSN, OSCAR (AIM/ICQ), Yahoo and Twitter. For more information about adding an account, see <emphasis>help account add &lt;protocol&gt;</emphasis>.
+					Adds an account on the given server with the specified protocol, username and password to the account list. For a list of supported protocols, use the <emphasis>plugins</emphasis> command. For more information about adding an account, see <emphasis>help account add &lt;protocol&gt;</emphasis>.
 				</para>
 
 				<para>
@@ -42,31 +42,6 @@
 				</description>
 			</bitlbee-command>
 
-			<bitlbee-command name="msn">
-				<syntax>account add msn &lt;handle@server.tld&gt; [&lt;password&gt;]</syntax>
-
-				<description>
-					<para>
-						For MSN connections there are no special arguments.
-					</para>
-				</description>
-			</bitlbee-command>
-			
-			<bitlbee-command name="oscar">
-				<syntax>account add oscar &lt;handle&gt; [&lt;password&gt;]</syntax>
-
-				<description>
-					<para>
-						OSCAR is the protocol used to connect to AIM and/or ICQ. The servers will automatically detect if you're using a numeric or non-numeric username so there's no need to tell which network you want to connect to.
-					</para>
-				</description>
-
-				<ircexample>
-					<ircline nick="wilmer">account add oscar 72696705 hobbelmeeuw</ircline>
-					<ircline nick="root">Account successfully added</ircline>
-				</ircexample>
-			</bitlbee-command>
-			
 			<bitlbee-command name="twitter">
 				<syntax>account add twitter &lt;handle&gt;</syntax>
 
@@ -99,16 +74,6 @@
 				<description>
 					<para>
 						Same protocol as <emphasis>twitter</emphasis>, but defaults to a <emphasis>base_url</emphasis> pointing at identi.ca. It also works with OAuth (so don't specify your password).
-					</para>
-				</description>
-			</bitlbee-command>
-
-			<bitlbee-command name="yahoo">
-				<syntax>account add yahoo &lt;handle&gt; [&lt;password&gt;]</syntax>
-
-				<description>
-					<para>
-						For Yahoo! connections there are no special arguments.
 					</para>
 				</description>
 			</bitlbee-command>
@@ -193,7 +158,7 @@
 
 	<bitlbee-command name="channel">
 		<short-description>Channel list maintenance</short-description>
-		<syntax>channel [&lt;account id&gt;] &lt;action&gt; [&lt;arguments&gt;]</syntax>
+		<syntax>channel [&lt;channel id&gt;] &lt;action&gt; [&lt;arguments&gt;]</syntax>
 
 		<description>
 			<para>
@@ -257,13 +222,13 @@
 		<description>
 
 			<para>
-				Available actions: add, with. See <emphasis>help chat &lt;action&gt;</emphasis> for more information.
+				Available actions: add, with, list. See <emphasis>help chat &lt;action&gt;</emphasis> for more information.
 			</para>
 
 		</description>
 
 		<bitlbee-command name="add">
-			<syntax>chat add &lt;account id&gt; &lt;room&gt; [&lt;channel&gt;]</syntax>
+			<syntax>chat add &lt;account id&gt; &lt;room|!index&gt; [&lt;channel&gt;]</syntax>
 
 			<description>
 				<para>
@@ -271,7 +236,7 @@
 				</para>
 
 				<para>
-					After adding a room to your list, you can simply use the IRC /join command to enter the room. Also, you can tell BitlBee to automatically join the room when you log in. (See <emphasis>chat set</emphasis>)
+					After adding a room to your list, you can simply use the IRC /join command to enter the room. Also, you can tell BitlBee to automatically join the room when you log in. (<emphasis>channel &lt;channel&gt; set auto_join true</emphasis>)
 				</para>
 
 				<para>
@@ -281,12 +246,39 @@
 
 		</bitlbee-command>
 
+		<bitlbee-command name="list">
+			<syntax>chat list &lt;account id&gt; [&lt;server&gt;]</syntax>
+
+			<description>
+				<para>
+					List existing named chatrooms provided by an account. Chats from this list can be referenced from <emphasis>chat add</emphasis> by using the number in the index column after a "!" as a shortcut.
+				</para>
+
+				<para>
+					The server parameter is optional and currently only used by jabber.
+				</para>
+			</description>
+
+			<ircexample>
+				<ircline nick="dx">chat list facebook</ircline>
+				<ircline pre="1" nick="root">Index  Title                 Topic</ircline>
+				<ircline pre="1" nick="root">    1  869891016470949       cool kids club</ircline>
+				<ircline pre="1" nick="root">    2  457892181062459       uncool kids club</ircline>
+				<ircline nick="root">2 facebook chatrooms</ircline>
+				<ircline nick="dx">chat add facebook !1 #cool-kids-club</ircline>
+			</ircexample>
+		</bitlbee-command>
+
 		<bitlbee-command name="with">
 			<syntax>chat with &lt;nickname&gt;</syntax>
 
 			<description>
 				<para>
 					While most <emphasis>chat</emphasis> subcommands are about named chatrooms, this command can be used to open an unnamed groupchat with one or more persons. This command is what <emphasis>/join #nickname</emphasis> used to do in older BitlBee versions.
+				</para>
+
+				<para>
+					Another way to do this is to join to a new, empty channel with <emphasis>/join #newchannel</emphasis> and invite the first person with <emphasis>/invite nickname</emphasis>
 				</para>
 			</description>
 		</bitlbee-command>
@@ -324,7 +316,7 @@
 
 		<description>
 			<para>
-				Requests IM-network-specific information about the specified user. The amount of information you'll get differs per protocol. For some protocols (ATM Yahoo! and MSN) it'll give you an URL which you can visit with a normal web browser to get the information.
+				Requests IM-network-specific information about the specified user. The amount of information you'll get differs per protocol. For some protocols it'll give you an URL which you can visit with a normal web browser to get the information.
 			</para>
 		</description>
 
@@ -648,6 +640,24 @@
 		</description>
 	</bitlbee-setting>
 
+	<bitlbee-setting name="always_use_nicks" type="boolean" scope="channel">
+		<default>false</default>
+
+		<description>
+			<para>
+				Jabber groupchat specific. This setting ensures that the nicks defined by the other members of a groupchat are used, instead of the username part of their JID. This only applies to groupchats where their real JID is known (either "non-anonymous" ones, or "semi-anonymous" from the point of view of the channel moderators)
+			</para>
+
+			<para>
+				Enabling this may have the side effect of changing the nick of existing contacts, either in your buddy list or in other groupchats. If a contact is in multiple groupchats with different nicks, enabling this setting for all those would result in multiple nick changes when joining, and the order of those changes may vary.
+			</para>
+
+			<para>
+				Note that manual nick changes done through the <emphasis>rename</emphasis> command always take priority
+			</para>
+		</description>
+	</bitlbee-setting>
+
 	<bitlbee-setting name="auto_connect" type="boolean" scope="account,global">
 		<default>true</default>
 
@@ -855,24 +865,7 @@
 
 		<description>
 			<para>
-				With this setting enabled, you can use some commands in your Twitter channel/query. The commands are simple and not documented in too much detail:
-			</para>
-
-			<variablelist>
-				<varlistentry><term>undo #[&lt;id&gt;]</term><listitem><para>Delete your last Tweet (or one with the given ID)</para></listitem></varlistentry>
-				<varlistentry><term>rt &lt;screenname|#id&gt;</term><listitem><para>Retweet someone's last Tweet (or one with the given ID)</para></listitem></varlistentry>
-				<varlistentry><term>reply &lt;screenname|#id&gt;</term><listitem><para>Reply to a Tweet (with a reply-to reference)</para></listitem></varlistentry>
-				<varlistentry><term>rawreply &lt;screenname|#id&gt;</term><listitem><para>Reply to a Tweet (with no reply-to reference)</para></listitem></varlistentry>
-				<varlistentry><term>report &lt;screenname|#id&gt;</term><listitem><para>Report the given user (or the user who posted the tweet with the given ID) for sending spam. This will also block them.</para></listitem></varlistentry>
-				<varlistentry><term>follow &lt;screenname&gt;</term><listitem><para>Start following a person</para></listitem></varlistentry>
-				<varlistentry><term>unfollow &lt;screenname&gt;</term><listitem><para>Stop following a person</para></listitem></varlistentry>
-				<varlistentry><term>favourite &lt;screenname|#id&gt;</term><listitem><para>Favo<emphasis>u</emphasis>rite the given user's most recent tweet, or the given tweet ID.</para></listitem></varlistentry>
-				<varlistentry><term>post &lt;message&gt;</term><listitem><para>Post a tweet</para></listitem></varlistentry>
-				<varlistentry><term>url &lt;screenname|#id&gt;</term><listitem><para>Show URL for a tweet to open it in a browser (and see context)</para></listitem></varlistentry>
-			</variablelist>
-
-			<para>
-				Anything that doesn't look like a command will be treated as a tweet. Watch out for typos, or to avoid this behaviour, you can set this setting to <emphasis>strict</emphasis>, which causes the <emphasis>post</emphasis> command to become mandatory for posting a tweet.
+				With this setting enabled, you can use some commands in your Twitter channel/query. See <emphasis>help twitter</emphasis> for the list of extra commands available.
 			</para>
 		</description>
 	</bitlbee-setting>
@@ -905,13 +898,10 @@
 	<bitlbee-setting name="display_name" type="string" scope="account">
 		<description>
 			<para>
-				Currently only available for MSN connections, and for jabber groupchats.
+				Currently only available for jabber groupchats.
 			</para>
 			<para>
-				For MSN: This setting allows you to read and change your "friendly name" for this connection. Since this is a server-side setting, it can't be changed when the account is off-line.
-			</para>
-			<para>
-				For jabber groupchats: this sets the default value of 'nick' for newly created groupchats. There is no way to set an account-wide nick like MSN.
+				For jabber groupchats: this sets the default value of 'nick' for newly created groupchats. There is no way to set an account-wide nick.
 			</para>
 		</description>
 	</bitlbee-setting>
@@ -972,17 +962,21 @@
 		</description>
 	</bitlbee-setting>
 
-	<bitlbee-setting name="handle_unknown" type="string" scope="global">
+	<bitlbee-setting name="handle_unknown" type="string" scope="account,global">
 		<default>add_channel</default>
-		<possible-values>root, add, add_private, add_channel, ignore</possible-values>
+		<possible-values>add_private, add_channel, ignore</possible-values>
 
 		<description>
 			<para>
-				By default, messages from people who aren't in your contact list are shown in a control channel instead of as a private message.
+				By default, messages from people who aren't in your contact list are shown in a control channel (add_channel) instead of as a private message (add_private)
 			</para>
 
 			<para>
 				If you prefer to ignore messages from people you don't know, you can set this one to "ignore". "add_private" and "add_channel" are like add, but you can use them to make messages from unknown buddies appear in the channel instead of a query window.
+			</para>
+
+			<para>
+				This can be set to individual accounts, which is useful to only ignore accounts that are targeted by spammers, without missing messages from legitimate unknown contacts in others. Note that incoming add requests are visible regardless of this setting.
 			</para>
 
 			<note>
@@ -1005,34 +999,12 @@
 
 	</bitlbee-setting>
 
-	<bitlbee-setting name="lcnicks" type="boolean" scope="global">
-		<default>true</default>
-
-		<description>
-			<para>
-				Hereby you can change whether you want all lower case nick names or leave the case as it intended by your peer.
-			</para>
-		</description>
-
-	</bitlbee-setting>
-
-	<bitlbee-setting name="local_display_name" type="boolean" scope="account">
-		<default>false</default>
-
-		<description>
-			<para>
-				Mostly meant to work around a bug in MSN servers (forgetting the display name set by the user), this setting tells BitlBee to store your display name locally and set this name on the MSN servers when connecting.
-			</para>
-		</description>
-
-	</bitlbee-setting>
-
 	<bitlbee-setting name="mail_notifications" type="boolean" scope="account">
 		<default>false</default>
 
 		<description>
 			<para>
-				Some protocols (MSN, Yahoo!, GTalk) can notify via IM about new e-mail. Since most people use their Hotmail/Yahoo! addresses as a spam-box, this is disabled default. If you want these notifications, you can enable this setting.
+				Some protocols can notify via IM about new e-mail. If you want these notifications, you can enable this setting.
 			</para>
 		</description>
 
@@ -1050,11 +1022,11 @@
 	</bitlbee-setting>
 
 	<bitlbee-setting name="message_length" type="integer" scope="account">
-		<default>140</default>
+		<default>280</default>
 
 		<description>
 			<para>
-				Since Twitter rejects messages longer than 140 characters, BitlBee can count message length and emit a warning instead of waiting for Twitter to reject it.
+				Since Twitter rejects messages longer than 280 characters, BitlBee can count message length and emit a warning instead of waiting for Twitter to reject it.
 			</para>
 
 			<para>
@@ -1180,6 +1152,36 @@
 				With this setting set to <emphasis>full_name</emphasis>, the person's full name is used to generate a nickname. Or if you don't like long nicknames, set this setting to <emphasis>first_name</emphasis> instead and only the first word will be used. Note that the full name can be full of non-ASCII characters which will be stripped off.
 			</para>
 		</description>
+	</bitlbee-setting>
+
+	<bitlbee-setting name="nick_lowercase" type="boolean" scope="global">
+		<default>true</default>
+
+		<description>
+			<para>
+				If enabled, all nicknames are turned into lower case.
+			</para>
+
+			<para>
+				See also the <emphasis>nick_underscores</emphasis> setting. This setting was previously known as <emphasis>lcnicks</emphasis>.
+			</para>
+		</description>
+
+	</bitlbee-setting>
+
+	<bitlbee-setting name="nick_underscores" type="boolean" scope="global">
+		<default>true</default>
+
+		<description>
+			<para>
+				If enabled, spaces in nicknames are turned into underscores instead of being stripped.
+			</para>
+
+			<para>
+				See also the <emphasis>nick_lowercase</emphasis> setting.
+			</para>
+		</description>
+
 	</bitlbee-setting>
 
 	<bitlbee-setting name="oauth" type="boolean" scope="account">
@@ -1490,14 +1492,14 @@
 				Comma-separated list of statuses of users you want in the channel,
 				and any modes they should have. The following statuses are currently
 				recognised: <emphasis>online</emphasis> (i.e. available, not
-				away), <emphasis>special</emphasis>, <emphasis>away</emphasis>,
-				and <emphasis>offline</emphasis>.
+				away), <emphasis>special</emphasis> (specific to the protocol), 
+				<emphasis>away</emphasis>, and <emphasis>offline</emphasis>.
 			</para>
 			
 			<para>
 				If a status is followed by a valid channel mode character
 				(@, % or +), it will be given to users with that status.
-				For example, <emphasis>online@,special%,away+,offline</emphasis>
+				For example, <emphasis>online@,special%,away+,offline</emphasis> 
 				will show all users in the channel. Online people will
 				have +o, people who are online but away will have +v,
 				and others will have no special modes.
@@ -1574,24 +1576,6 @@
 		<description>
 			<para>
 				This setting specifies the number of old mentions to fetch on connection. Must be less or equal to 200. Setting it to 0 disables this feature.
-			</para>
-		</description>
-	</bitlbee-setting>
-
-	<bitlbee-setting name="switchboard_keepalives" type="boolean" scope="account">
-		<default>false</default>
-
-		<description>
-			<para>
-				Turn on this flag if you have difficulties talking to offline/invisible contacts.
-			</para>
-			
-			<para>
-				With this setting enabled, BitlBee will send keepalives to MSN switchboards with offline/invisible contacts every twenty seconds. This should keep the server and client on the other side from shutting it down.
-			</para>
-			
-			<para>
-				This is useful because BitlBee doesn't support MSN offline messages yet and the MSN servers won't let the user reopen switchboards to offline users. Once offline messaging is supported, this flag might be removed.
 			</para>
 		</description>
 	</bitlbee-setting>
@@ -1766,7 +1750,7 @@
 	<bitlbee-command name="rename">
 		<short-description>Rename (renick) a buddy</short-description>
 		<syntax>rename &lt;oldnick&gt; &lt;newnick&gt;</syntax>
-		<syntax>rename -del &lt;oldnick&gt;</syntax>
+		<syntax>rename -del &lt;nick&gt;</syntax>
 
 		<description>
 			<para>
@@ -1814,6 +1798,22 @@
 				By default, this answers the first unanswered question. You can also specify a different question as an argument. You can use the <emphasis>qlist</emphasis> command for a list of questions.
 			</para>
 		</description>
+	</bitlbee-command>
+
+	<bitlbee-command name="plugins">
+		<short-description>List all the external plugins and protocols</short-description>
+		<syntax>plugins [info &lt;name&gt;]</syntax>
+
+		<description>
+			<para>
+				This gives you a list of all the external plugins and protocols.
+			</para>
+
+			<para>
+				Use the <emphasis>info</emphasis> subcommand to get more details about a plugin.
+			</para>
+		</description>
+
 	</bitlbee-command>
 
 	<bitlbee-command name="qlist">

@@ -14,6 +14,7 @@ etcdir='$prefix/etc/bitlbee/'
 mandir='$prefix/share/man/'
 datadir='$prefix/share/bitlbee/'
 config='/var/lib/bitlbee/'
+libdir='$prefix/lib/'
 plugindir='$prefix/lib/bitlbee/'
 includedir='$prefix/include/bitlbee/'
 systemdsystemunitdir=''
@@ -31,30 +32,29 @@ configure_args="$@"
 # If the user sets one of these to 1, purple won't disable them.
 # Otherwise, if it's still default-on, it gets included in normal builds,
 # but not purple ones.
-msn="default-on"
 jabber="default-on"
-oscar="default-on"
-yahoo="default-on"
 
 twitter=1
 purple=0
 
+verbose=0
 doc=1
 debug=0
-strip=1
+strip=0
 gcov=0
 asan=0
 plugins=1
 otr=0
-skype=0
 
 events=glib
 ssl=auto
 
+pam=0
+ldap=0
+
 pie=1
 
 arch=$(uname -s)
-cpu=$(uname -m)
 
 GLIB_MIN_VERSION=2.16
 
@@ -124,14 +124,16 @@ Option		Description				Default
 --pidfile=...						$pidfile
 --config=...						$config
 
---msn=0/1	Disable/enable MSN part			$msn
+--verbose=0/1	Disable/enable verbose build		$verbose
+
 --jabber=0/1	Disable/enable Jabber part		$jabber
---oscar=0/1	Disable/enable Oscar part (ICQ, AIM)	$oscar
---yahoo=0/1	Disable/enable Yahoo part		$yahoo
 --twitter=0/1	Disable/enable Twitter part		$twitter
 
 --purple=0/1	Disable/enable libpurple support	$purple
 		(automatically disables other protocol modules)
+
+--pam=0/1	Disable/enable PAM authentication	$pam
+--ldap=0/1	Disable/enable LDAP authentication	$ldap
 
 --doc=0/1	Disable/enable help.txt generation	$doc
 --debug=0/1	Disable/enable debugging		$debug
@@ -142,8 +144,6 @@ Option		Description				Default
 --plugins=0/1	Disable/enable plugins support		$plugins
 --otr=0/1/auto/plugin
 		Disable/enable OTR encryption support	$otr
---skype=0/1/plugin
-		Disable/enable Skype support		$skype
 
 --events=...	Event handler (glib, libevent)		$events
 --ssl=...	SSL library to use (gnutls, nss, openssl, auto)
@@ -166,6 +166,7 @@ etcdir=$(eval echo "$etcdir/" | sed 's/\/\{1,\}/\//g')
 mandir=$(eval echo "$mandir/" | sed 's/\/\{1,\}/\//g')
 datadir=$(eval echo "$datadir/" | sed 's/\/\{1,\}/\//g')
 config=$(eval echo "$config/" | sed 's/\/\{1,\}/\//g')
+libdir=$(eval echo "$libdir/" | sed 's/\/\{1,\}/\//g')
 plugindir=$(eval echo "$plugindir/" | sed 's/\/\{1,\}/\//g')
 includedir=$(eval echo "$includedir"/ | sed 's/\/\{1,\}/\//g')
 libevent=$(eval echo "$libevent"/ | sed 's/\/\{1,\}/\//g')
@@ -189,12 +190,11 @@ MANDIR=$mandir
 DATADIR=$datadir
 PLUGINDIR=$plugindir
 CONFIG=$config
+LIBDIR=$libdir
 INCLUDEDIR=$includedir
 PCDIR=$pcdir
 
 TARGET=$target
-ARCH=$arch
-CPU=$cpu
 
 INSTALL=install -p
 
@@ -239,10 +239,9 @@ cat<<EOF >config.h
 #define ETCDIR "$etcdir"
 #define VARDIR "$datadir"
 #define PLUGINDIR "$plugindir"
+#define DATADIR "$datadir"
 #define PIDFILE "$pidfile"
 #define IPCSOCKET "$ipcsocket"
-#define ARCH "$arch"
-#define CPU "$cpu"
 EOF
 
 
@@ -283,11 +282,30 @@ if [ "$asan" = "1" ]; then
 	debug=1
 fi
 
+if [ "$verbose" = "0" ]; then
+	echo 'VERBOSE=@' >> Makefile.settings
+else
+	echo 'VERBOSE=' >> Makefile.settings
+fi
+
+cat <<EOF >>Makefile.settings
+
+# Enable/disable output verbosity
+ifdef V
+ifeq (\$(V),1)
+	VERBOSE=
+else
+	VERBOSE=@
+endif
+endif
+
+EOF
+
 if [ "$debug" = "1" ]; then
 	echo 'DEBUG=1' >> Makefile.settings
 	CFLAGS="$CFLAGS -g3 -DDEBUG -O0"
 else
-	[ -z "$CFLAGS" ] && CFLAGS="-O2 -fno-strict-aliasing"
+	[ -z "$CFLAGS" ] && CFLAGS="-g -O2 -fno-strict-aliasing"
 fi
 
 if [ "$pie" = "1" ]; then
@@ -314,9 +332,9 @@ else
 fi
 
 echo "CC=$CC" >> Makefile.settings;
-if echo $CC | grep -qw gcc; then
+if echo $CC | grep -qw 'gcc\|clang'; then
 	# Apparently -Wall is gcc-specific?
-	echo CFLAGS+=-Wall >> Makefile.settings
+	echo CFLAGS+=-Wall -Wformat -Werror=format-security >> Makefile.settings
 fi
 
 if [ -z "$LD" ]; then
@@ -334,7 +352,13 @@ if [ -z "$PKG_CONFIG" ]; then
 	PKG_CONFIG=pkg-config
 fi
 
-if $PKG_CONFIG --version > /dev/null 2>/dev/null && $PKG_CONFIG glib-2.0; then
+if ! $PKG_CONFIG --version > /dev/null 2>/dev/null; then
+	echo
+	echo 'Cannot find pkg-config, aborting.'
+	exit 1
+fi
+
+if $PKG_CONFIG glib-2.0; then
 	if $PKG_CONFIG glib-2.0 --atleast-version=$GLIB_MIN_VERSION; then
 		cat<<EOF >>Makefile.settings
 EFLAGS+=$($PKG_CONFIG --libs glib-2.0 gmodule-2.0)
@@ -458,6 +482,16 @@ int main()
 }
 '
 
+BACKTRACE_TESTCODE='
+#include <execinfo.h>
+
+int main()
+{
+	void *trace[16];
+	return backtrace(trace, 16);
+}
+'
+
 detect_resolv_dynamic()
 {
 	case "$arch" in
@@ -555,6 +589,19 @@ detect_nameser_has_ns_types()
 	return $ret
 }
 
+detect_backtrace()
+{
+	TMPFILE=$(mktemp /tmp/bitlbee-configure.XXXXXX)
+	ret=1
+	echo "$BACKTRACE_TESTCODE" | $CC -o $TMPFILE -x c -  >/dev/null 2>/dev/null
+	if [ "$?" = "0" ]; then
+		ret=0
+	fi
+
+	rm -f $TMPFILE
+	return $ret
+}
+
 if [ "$ssl" = "auto" ]; then
 	detect_gnutls
 	if [ "$ret" = "0" ]; then
@@ -620,6 +667,10 @@ else
 	echo 'Insufficient resolv routines. Jabber server must be set explicitly'
 fi
 
+if detect_backtrace; then
+	echo '#define HAVE_BACKTRACE' >> config.h
+	echo '#define CRASHFILE "'$config'crash.log"' >> config.h
+fi
 
 STORAGES="xml"
 
@@ -627,6 +678,33 @@ for i in $STORAGES; do
 	STORAGE_OBJS="$STORAGE_OBJS storage_$i.o"
 done
 echo "STORAGE_OBJS="$STORAGE_OBJS >> Makefile.settings
+
+authobjs=
+authlibs=
+if [ "$pam" = 0 ]; then
+	echo '#undef WITH_PAM' >> config.h
+else
+	if ! echo '#include <security/pam_appl.h>' | $CC -E - >/dev/null 2>/dev/null; then
+		echo 'Cannot find libpam development libraries, aborting. (Install libpam0g-dev?)'
+		exit 1
+	fi
+	echo '#define WITH_PAM' >> config.h
+	authobjs=$authobjs'auth_pam.o '
+	authlibs=$authlibs'-lpam '
+fi
+if [ "$ldap" = 0 ]; then
+	echo '#undef WITH_LDAP' >> config.h
+else
+	if ! echo '#include <ldap.h>' | $CC -E - >/dev/null 2>/dev/null; then
+		echo 'Cannot find libldap development libraries, aborting. (Install libldap2-dev?)'
+		exit 1
+	fi
+	echo '#define WITH_LDAP' >> config.h
+	authobjs=$authobjs'auth_ldap.o '
+	authlibs=$authlibs'-lldap '
+fi
+echo AUTH_OBJS=$authobjs >> Makefile.settings
+echo EFLAGS+=$authlibs >> Makefile.settings
 
 if [ "$strip" = 0 ]; then
 	echo "STRIP=\# skip strip" >> Makefile.settings;
@@ -696,23 +774,13 @@ elif [ "$otr" = "plugin" ]; then
 	echo 'OTR_PI=otr.so' >> Makefile.settings
 fi
 
-if [ "$skype" = "1" -o "$skype" = "plugin" ]; then
-	if [ "$arch" = "Darwin" ]; then
-		echo "SKYPEFLAGS=-dynamiclib -undefined dynamic_lookup" >> Makefile.settings
-	else
-		echo "SKYPEFLAGS=-fPIC -shared" >> Makefile.settings
-	fi
-	echo 'SKYPE_PI=skype.so' >> Makefile.settings
-	protocols_mods="$protocol_mods skype(plugin)"
-fi
-
 if [ -z "$PYTHON" ]; then
 	PYTHON=python
 fi
 
 if [ "$doc" = "1" ]; then
 	# check this here just in case someone tries to install it in python2.4...
-	if ! $PYTHON -m xml.etree.ElementTree > /dev/null 2>&1; then
+	if [ ! -e $srcdir/doc/user-guide/help.txt ] && ! $PYTHON -m xml.etree.ElementTree > /dev/null 2>&1; then
 		echo
 		echo 'ERROR: Python (>=2.5 or 3.x) is required to generate docs'
 		echo "(Use the PYTHON environment variable if it's in a weird location)"
@@ -745,16 +813,24 @@ if ! make helloworld > /dev/null 2>&1; then
 	fi
 fi
 
+pkgconfiglibs=''
+case "$arch" in
+CYGWIN* )
+	pkgconfiglibs='-L${libdir} -lbitlbee -no-undefined'
+esac
+
 cat <<EOF >bitlbee.pc
 prefix=$prefix
 includedir=$includedir
 plugindir=$plugindir
+libdir=$libdir
+datadir=$datadir
 
 Name: bitlbee
 Description: IRC to IM gateway
 Requires: glib-2.0
 Version: $BITLBEE_VERSION
-Libs:
+Libs: $pkgconfiglibs
 Cflags: -I\${includedir}
 
 EOF
@@ -779,10 +855,7 @@ EOF
 	protoobjs=$protoobjs'purple_mod.o '
 
 	# only disable these if the user didn't enable them explicitly
-	[ "$msn" = "default-on" ] && msn=0
 	[ "$jabber" = "default-on" ] && jabber=0
-	[ "$oscar" = "default-on" ] && oscar=0
-	[ "$yahoo" = "default-on" ] && yahoo=0
 
 	echo '#undef PACKAGE' >> config.h
 	echo '#define PACKAGE "BitlBee-LIBPURPLE"' >> config.h
@@ -803,36 +876,12 @@ case "$CC" in
 	done
 esac
 
-if [ "$msn" = 0 ]; then
-	echo '#undef WITH_MSN' >> config.h
-else
-	echo '#define WITH_MSN' >> config.h
-	protocols=$protocols'msn '
-	protoobjs=$protoobjs'msn_mod.o '
-fi
-
 if [ "$jabber" = 0 ]; then
 	echo '#undef WITH_JABBER' >> config.h
 else
 	echo '#define WITH_JABBER' >> config.h
 	protocols=$protocols'jabber '
 	protoobjs=$protoobjs'jabber_mod.o '
-fi
-
-if [ "$oscar" = 0 ]; then
-	echo '#undef WITH_OSCAR' >> config.h
-else
-	echo '#define WITH_OSCAR' >> config.h
-	protocols=$protocols'oscar '
-	protoobjs=$protoobjs'oscar_mod.o '
-fi
-
-if [ "$yahoo" = 0 ]; then
-	echo '#undef WITH_YAHOO' >> config.h
-else
-	echo '#define WITH_YAHOO' >> config.h
-	protocols=$protocols'yahoo '
-	protoobjs=$protoobjs'yahoo_mod.o '
 fi
 
 if [ "$twitter" = 0 ]; then
@@ -873,6 +922,8 @@ AIX )
 	echo 'EFLAGS+=-Wl,-brtl' >> Makefile.settings
 ;;
 CYGWIN* )
+	echo 'EFLAGS+=-Wl,--export-all,--out-implib,libbitlbee.dll.a' >> Makefile.settings
+	echo 'IMPLIB=libbitlbee.dll.a' >> Makefile.settings
 ;;
 Windows )
 	echo 'Native windows compilation is not supported anymore, use cygwin instead.'

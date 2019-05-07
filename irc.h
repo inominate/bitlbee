@@ -26,8 +26,11 @@
 #ifndef _IRC_H
 #define _IRC_H
 
+#include <sys/socket.h>
+
 #define IRC_MAX_LINE 512
 #define IRC_MAX_ARGS 16
+#define IRC_WORD_WRAP 425
 
 #define IRC_LOGIN_TIMEOUT 60
 #define IRC_PING_STRING "PinglBee"
@@ -72,6 +75,7 @@ typedef enum {
 	CAP_EXTENDED_JOIN = (1 << 2),
 	CAP_AWAY_NOTIFY = (1 << 3),
 	CAP_USERHOST_IN_NAMES = (1 << 4),
+	CAP_SERVER_TIME = (1 << 5),
 } irc_cap_flag_t;
 
 struct irc_user;
@@ -81,7 +85,7 @@ typedef struct irc {
 	irc_status_t status;
 	double last_pong;
 	int pinging;
-	char *sendbuffer;
+	GString *sendbuffer;
 	char *readbuffer;
 	GIConv iconv, oconv;
 
@@ -91,13 +95,15 @@ typedef struct irc {
 	char *password; /* HACK: Used to save the user's password, but before
 	                   logging in, this may contain a password we should
 	                   send to identify after USER/NICK are received. */
+	char *auth_backend;
 
 	char umode[8];
 
 	struct query *queries;
 	GSList *file_transfers;
 
-	GSList *users, *channels;
+	GSList *users G_GNUC_DEPRECATED;
+	GSList *channels;
 	struct irc_channel *default_channel;
 	GHashTable *nick_user_hash;
 	GHashTable *watches; /* See irc_cmd_watch() */
@@ -268,6 +274,7 @@ extern GSList *irc_plugins; /* struct irc_plugin */
 extern GSList *irc_connection_list;
 
 irc_t *irc_new(int fd);
+void irc_set_hosts(irc_t *irc, const struct sockaddr *remote_addr, const socklen_t remote_addrlen);
 void irc_abort(irc_t *irc, int immed, char *format, ...) G_GNUC_PRINTF(3, 4);
 void irc_free(irc_t *irc);
 void irc_setpass(irc_t *irc, const char *pass);
@@ -305,7 +312,7 @@ int irc_channel_set_topic(irc_channel_t *ic, const char *topic, const irc_user_t
 void irc_channel_user_set_mode(irc_channel_t *ic, irc_user_t *iu, irc_channel_user_flags_t flags);
 void irc_channel_set_mode(irc_channel_t *ic, const char *s);
 void irc_channel_auto_joins(irc_t *irc, struct account *acc);
-void irc_channel_printf(irc_channel_t *ic, char *format, ...);
+void irc_channel_printf(irc_channel_t *ic, char *format, ...) G_GNUC_PRINTF(2, 3);
 gboolean irc_channel_name_ok(const char *name);
 void irc_channel_name_strip(char *name);
 int irc_channel_name_cmp(const char *a_, const char *b_);
@@ -324,9 +331,9 @@ void irc_send_num(irc_t *irc, int code, char *format, ...) G_GNUC_PRINTF(3, 4);
 void irc_send_login(irc_t *irc);
 void irc_send_motd(irc_t *irc);
 const char *irc_user_msgdest(irc_user_t *iu);
-void irc_rootmsg(irc_t *irc, char *format, ...);
-void irc_usermsg(irc_user_t *iu, char *format, ...);
-void irc_usernotice(irc_user_t *iu, char *format, ...);
+void irc_rootmsg(irc_t *irc, char *format, ...) G_GNUC_PRINTF(2, 3);
+void irc_usermsg(irc_user_t *iu, char *format, ...) G_GNUC_PRINTF(2, 3);
+void irc_usernotice(irc_user_t *iu, char *format, ...) G_GNUC_PRINTF(2, 3);
 void irc_send_join(irc_channel_t *ic, irc_user_t *iu);
 void irc_send_part(irc_channel_t *ic, irc_user_t *iu, const char *reason);
 void irc_send_quit(irc_user_t *iu, const char *reason);
@@ -345,6 +352,9 @@ void irc_send_invite(irc_user_t *iu, irc_channel_t *ic);
 void irc_send_cap(irc_t *irc, char *subcommand, char *body);
 void irc_send_away_notify(irc_user_t *iu);
 
+G_GNUC_INTERNAL void irc_send_msg_ts(irc_user_t *iu, const char *type, const char *dst, const char *msg, const char *prefix, time_t ts);
+G_GNUC_INTERNAL void irc_send_msg_raw_tags(irc_user_t *iu, const char *type, const char *dst, const char* tags, const char *msg);
+
 /* irc_user.c */
 irc_user_t *irc_user_new(irc_t *irc, const char *nick);
 int irc_user_free(irc_t *irc, irc_user_t *iu);
@@ -357,6 +367,7 @@ void irc_user_quit(irc_user_t *iu, const char *msg);
 /* irc_util.c */
 char *set_eval_timezone(struct set *set, char *value);
 char *irc_format_timestamp(irc_t *irc, time_t msg_ts);
+G_GNUC_INTERNAL char *irc_format_servertime(irc_t *irc, time_t msg_ts);
 char *set_eval_self_messages(struct set *set, char *value);
 
 /* irc_im.c */

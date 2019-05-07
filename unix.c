@@ -45,6 +45,10 @@
 #include "otr.h"
 #endif
 
+#ifdef HAVE_BACKTRACE
+#include <execinfo.h>
+#endif
+
 global_t global;        /* Against global namespace pollution */
 
 static struct {
@@ -62,6 +66,9 @@ int main(int argc, char *argv[])
 	int i = 0;
 	char *old_cwd = NULL;
 	struct sigaction sig, old;
+#ifdef HAVE_BACKTRACE
+	void *unused[1];
+#endif
 
 	/* Required to make iconv to ASCII//TRANSLIT work. This makes BitlBee
 	   system-locale-sensitive. :-( */
@@ -77,6 +84,14 @@ int main(int argc, char *argv[])
 	global.conf = conf_load(argc, argv);
 	if (global.conf == NULL) {
 		return(1);
+	}
+
+	if (global.conf->runmode == RUNMODE_INETD) {
+		log_link(LOGLVL_ERROR, LOGOUTPUT_IRC);
+		log_link(LOGLVL_WARNING, LOGOUTPUT_IRC);
+	} else {
+		log_link(LOGLVL_ERROR, LOGOUTPUT_CONSOLE);
+		log_link(LOGLVL_WARNING, LOGOUTPUT_CONSOLE);
 	}
 
 	b_main_init();
@@ -103,23 +118,20 @@ int main(int argc, char *argv[])
 		return(1);
 	}
 
-	if (global.conf->runmode == RUNMODE_INETD) {
-		log_link(LOGLVL_ERROR, LOGOUTPUT_IRC);
-		log_link(LOGLVL_WARNING, LOGOUTPUT_IRC);
+	global.auth = auth_init(global.conf->auth_backend);
+	if (global.conf->auth_backend && global.auth == NULL) {
+		log_message(LOGLVL_ERROR, "Unable to load authentication backend '%s'", global.conf->auth_backend);
+		return(1);
+	}
 
+	if (global.conf->runmode == RUNMODE_INETD) {
 		i = bitlbee_inetd_init();
 		log_message(LOGLVL_INFO, "%s %s starting in inetd mode.", PACKAGE, BITLBEE_VERSION);
 
 	} else if (global.conf->runmode == RUNMODE_DAEMON) {
-		log_link(LOGLVL_ERROR, LOGOUTPUT_CONSOLE);
-		log_link(LOGLVL_WARNING, LOGOUTPUT_CONSOLE);
-
 		i = bitlbee_daemon_init();
 		log_message(LOGLVL_INFO, "%s %s starting in daemon mode.", PACKAGE, BITLBEE_VERSION);
 	} else if (global.conf->runmode == RUNMODE_FORKDAEMON) {
-		log_link(LOGLVL_ERROR, LOGOUTPUT_CONSOLE);
-		log_link(LOGLVL_WARNING, LOGOUTPUT_CONSOLE);
-
 		/* In case the operator requests a restart, we need this. */
 		old_cwd = g_malloc(256);
 		if (getcwd(old_cwd, 255) == NULL) {
@@ -141,12 +153,17 @@ int main(int argc, char *argv[])
 	    (!getuid() || !geteuid())) {
 		struct passwd *pw = NULL;
 		pw = getpwnam(global.conf->user);
-		if (pw) {
-			initgroups(global.conf->user, pw->pw_gid);
-			setgid(pw->pw_gid);
-			setuid(pw->pw_uid);
-		} else {
-			log_message(LOGLVL_WARNING, "Failed to look up user %s.", global.conf->user);
+		if (!pw) {
+			log_message(LOGLVL_ERROR, "Failed to look up user %s.", global.conf->user);
+
+		} else if (initgroups(global.conf->user, pw->pw_gid) != 0) {
+			log_message(LOGLVL_ERROR, "initgroups: %s.", strerror(errno));
+
+		} else if (setgid(pw->pw_gid) != 0) {
+			log_message(LOGLVL_ERROR, "setgid(%d): %s.", pw->pw_gid, strerror(errno));
+
+		} else if (setuid(pw->pw_uid) != 0) {
+			log_message(LOGLVL_ERROR, "setuid(%d): %s.", pw->pw_uid, strerror(errno));
 		}
 	}
 
@@ -164,6 +181,13 @@ int main(int argc, char *argv[])
 	sig.sa_handler = sighandler_shutdown;
 	sigaction(SIGINT, &sig, &old);
 	sigaction(SIGTERM, &sig, &old);
+
+#ifdef HAVE_BACKTRACE
+	/* As per the backtrace(3) man page, call this outside of the signal
+	 * handler once to ensure any dynamic libraries are loaded in an
+	 * async-signal-safe environment to prevent deadlocks */
+	backtrace(unused, 1);
+#endif
 
 	if (!getuid() || !geteuid()) {
 		log_message(LOGLVL_WARNING, "BitlBee is running with root privileges. Why?");
@@ -275,10 +299,62 @@ void sighandler_shutdown_setup()
 /* Signal handler for SIGTERM and SIGINT */
 static void sighandler_shutdown(int signal)
 {
+	int unused G_GNUC_UNUSED;
 	/* Write a single null byte to the pipe, just to send a message to the main loop.
 	 * This gets handled by bitlbee_shutdown (the b_input_add callback for this pipe) */
-	write(shutdown_pipe.fd[1], "", 1);
+	unused = write(shutdown_pipe.fd[1], "", 1);
 }
+
+#ifdef HAVE_BACKTRACE
+/* Writes a backtrace to (usually) /var/lib/bitlbee/crash.log
+ * No malloc allowed means not a lot can be written to that file */
+static void sighandler_crash_backtrace()
+{
+	int fd, mapsfd;
+	int size;
+	void *trace[128];
+	const char message[] = "## " PACKAGE " crashed\n"
+		"## Version: " BITLBEE_VERSION "\n"
+		"## Configure args: " BITLBEE_CONFIGURE_ARGS "\n"
+		"##\n"
+		"## Backtrace:\n\n";
+	const char message2[] = "\n"
+		"## Hint: To get details on addresses use\n"
+		"##   addr2line -e <binary> <address>\n"
+		"## or\n"
+		"##   gdb <binary> -ex 'l *<address>' -ex q\n"
+		"## where <binary> is a filename from above and <address> is the part between (...)\n"
+		"##\n\n";
+	const char message3[] = "\n## End of memory maps. See above for the backtrace\n\n";
+
+	fd = open(CRASHFILE, O_WRONLY | O_APPEND | O_CREAT, 0600);
+
+	if (fd == -1 || write(fd, message, sizeof(message) - 1) == -1) {
+		return;
+	}
+
+	size = backtrace(trace, 128);
+	backtrace_symbols_fd(trace, size, fd);
+
+	(void) write(fd, message2, sizeof(message2) - 1);
+
+	/* a bit too linux-specific, so fail gracefully */
+	mapsfd = open("/proc/self/maps", O_RDONLY, 0);
+
+	if (mapsfd != -1) {
+		char buf[4096] = {0};
+		ssize_t bytes;
+
+		while ((bytes = read(mapsfd, buf, sizeof(buf))) > 0) {
+			(void) write(fd, buf, bytes);
+		}
+		(void) close(mapsfd);
+		(void) write(fd, message3, sizeof(message3) - 1);
+	}
+
+	(void) close(fd);
+}
+#endif
 
 /* Signal handler for SIGSEGV
  * A desperate attempt to tell the user that everything is wrong in the world.
@@ -286,14 +362,24 @@ static void sighandler_shutdown(int signal)
 static void sighandler_crash(int signal)
 {
 	GSList *l;
-	const char *message = "ERROR :BitlBee crashed! (SIGSEGV received)\r\n";
-	int len = strlen(message);
+	const char message[] = "ERROR :BitlBee crashed! (SIGSEGV received)\r\n"
+#ifdef HAVE_BACKTRACE
+		"ERROR :Writing backtrace to " CRASHFILE "\r\n"
+#endif
+		"ERROR :This is a bug either in BitlBee or a plugin, ask us on IRC if unsure\r\n";
 
 	for (l = irc_connection_list; l; l = l->next) {
 		irc_t *irc = l->data;
 		sock_make_blocking(irc->fd);
-		write(irc->fd, message, len);
+		if (irc->sendbuffer) {
+			(void) write(irc->fd, irc->sendbuffer->str, irc->sendbuffer->len);
+		}
+		(void) write(irc->fd, message, sizeof(message) - 1);
 	}
+
+#ifdef HAVE_BACKTRACE
+	sighandler_crash_backtrace();
+#endif
 
 	raise(signal);
 }

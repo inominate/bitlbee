@@ -344,6 +344,8 @@ void twitter_login_finish(struct im_connection *ic)
 	           !(td->flags & TWITTER_HAVE_FRIENDS)) {
 		imcb_log(ic, "Getting contact list");
 		twitter_get_friends_ids(ic, -1);
+		twitter_get_mutes_ids(ic, -1);
+		twitter_get_noretweets_ids(ic, -1);
 	} else {
 		twitter_main_loop_start(ic);
 	}
@@ -357,25 +359,11 @@ static const struct oauth_service twitter_oauth = {
 	.consumer_secret = "FCxqcr0pXKzsF9ajmP57S3VQ8V6Drk4o2QYtqMcOszo",
 };
 
-static const struct oauth_service identica_oauth = {
-	"https://identi.ca/api/oauth/request_token",
-	"https://identi.ca/api/oauth/access_token",
-	"https://identi.ca/api/oauth/authorize",
-	.consumer_key = "e147ff789fcbd8a5a07963afbb43f9da",
-	.consumer_secret = "c596267f277457ec0ce1ab7bb788d828",
-};
-
 static gboolean twitter_oauth_callback(struct oauth_info *info);
 
 static const struct oauth_service *get_oauth_service(struct im_connection *ic)
 {
-	struct twitter_data *td = ic->proto_data;
-
-	if (strstr(td->url_host, "identi.ca")) {
-		return &identica_oauth;
-	} else {
-		return &twitter_oauth;
-	}
+	return &twitter_oauth;
 
 	/* Could add more services, or allow configuring your own base URL +
 	   API keys. */
@@ -388,9 +376,8 @@ static void twitter_oauth_start(struct im_connection *ic)
 
 	imcb_log(ic, "Requesting OAuth request token");
 
-	if (!strstr(url, "twitter.com") && !strstr(url, "identi.ca")) {
-		imcb_log(ic, "Warning: OAuth only works with identi.ca and "
-		         "Twitter.");
+	if (!strstr(url, "twitter.com")) {
+		imcb_log(ic, "Warning: OAuth only works with Twitter.");
 	}
 
 	td->oauth_info = oauth_request_token(get_oauth_service(ic), twitter_oauth_callback, ic);
@@ -468,16 +455,11 @@ int twitter_url_len_diff(gchar *msg, unsigned int target_len)
 
 	g_regex_match(regex, msg, 0, &match_info);
 	while (g_match_info_matches(match_info)) {
-		gchar *s, *url;
+		gchar *url;
 
 		url = g_match_info_fetch(match_info, 2);
 		url_len_diff += target_len - g_utf8_strlen(url, -1);
 
-		/* Add another character for https://t.co/... URLs */
-		if ((s = g_match_info_fetch(match_info, 3))) {
-			url_len_diff += 1;
-			g_free(s);
-		}
 		g_free(url);
 		g_match_info_next(match_info, NULL);
 	}
@@ -540,10 +522,10 @@ static void twitter_init(account_t * acc)
 
 	if (strcmp(acc->prpl->name, "twitter") == 0) {
 		def_url = TWITTER_API_URL;
-		def_tul = "22";
+		def_tul = "23";
 		def_mentions = "true";
-	} else {                /* if( strcmp( acc->prpl->name, "identica" ) == 0 ) */
-		def_url = IDENTICA_API_URL;
+	} else {
+		def_url = "";
 		def_tul = "0";
 		def_mentions = "false";
 	}
@@ -560,7 +542,7 @@ static void twitter_init(account_t * acc)
 
 	s = set_add(&acc->set, "fetch_mentions", def_mentions, set_eval_bool, acc);
 
-	s = set_add(&acc->set, "message_length", "140", set_eval_int, acc);
+	s = set_add(&acc->set, "message_length", "280", set_eval_int, acc);
 
 	s = set_add(&acc->set, "target_url_length", def_tul, set_eval_int, acc);
 
@@ -578,8 +560,11 @@ static void twitter_init(account_t * acc)
 	s = set_add(&acc->set, "_last_tweet", "0", NULL, acc);
 	s->flags |= SET_HIDDEN | SET_NOSAVE;
 
+	s = set_add(&acc->set, "in_korea", "false", set_eval_bool, acc);
+	s->flags |= SET_HIDDEN;
+
 	if (strcmp(acc->prpl->name, "twitter") == 0) {
-		s = set_add(&acc->set, "stream", "true", set_eval_bool, acc);
+		s = set_add(&acc->set, "stream", "false", set_eval_bool, acc);
 		s->flags |= ACC_SET_OFFLINE_ONLY;
 	}
 }
@@ -688,6 +673,12 @@ static void twitter_logout(struct im_connection *ic)
 		if (td->filter_update_id > 0) {
 			b_event_remove(td->filter_update_id);
 		}
+
+		g_slist_foreach(td->mutes_ids, (GFunc) g_free, NULL);
+		g_slist_free(td->mutes_ids);
+
+		g_slist_foreach(td->noretweets_ids, (GFunc) g_free, NULL);
+		g_slist_free(td->noretweets_ids);
 
 		http_close(td->stream);
 		twitter_filter_remove_all(ic);
@@ -947,7 +938,8 @@ static void twitter_handle_command(struct im_connection *ic, char *message)
 		goto eof;
 	} else if ((g_strcasecmp(cmd[0], "favourite") == 0 ||
 	            g_strcasecmp(cmd[0], "favorite") == 0 ||
-	            g_strcasecmp(cmd[0], "fav") == 0) && cmd[1]) {
+	            g_strcasecmp(cmd[0], "fav") == 0 ||
+	            g_strcasecmp(cmd[0], "like") == 0) && cmd[1]) {
 		if ((id = twitter_message_id_from_command_arg(ic, cmd[1], NULL))) {
 			twitter_favourite_tweet(ic, id);
 		} else {
@@ -959,6 +951,12 @@ static void twitter_handle_command(struct im_connection *ic, char *message)
 		goto eof;
 	} else if (g_strcasecmp(cmd[0], "unfollow") == 0 && cmd[1]) {
 		twitter_remove_buddy(ic, cmd[1], NULL);
+		goto eof;
+	} else if (g_strcasecmp(cmd[0], "mute") == 0 && cmd[1]) {
+		twitter_mute_create_destroy(ic, cmd[1], 1);
+		goto eof;
+	} else if (g_strcasecmp(cmd[0], "unmute") == 0 && cmd[1]) {
+		twitter_mute_create_destroy(ic, cmd[1], 0);
 		goto eof;
 	} else if ((g_strcasecmp(cmd[0], "report") == 0 ||
 	            g_strcasecmp(cmd[0], "spam") == 0) && cmd[1]) {
@@ -1081,7 +1079,7 @@ void twitter_initmodule()
 {
 	struct prpl *ret = g_new0(struct prpl, 1);
 
-	ret->options = OPT_NOOTR;
+	ret->options = PRPL_OPT_NOOTR | PRPL_OPT_NO_PASSWORD;
 	ret->name = "twitter";
 	ret->login = twitter_login;
 	ret->init = twitter_init;
@@ -1108,5 +1106,6 @@ void twitter_initmodule()
 	/* And an identi.ca variant: */
 	ret = g_memdup(ret, sizeof(struct prpl));
 	ret->name = "identica";
+	ret->options =  PRPL_OPT_NOOTR;
 	register_protocol(ret);
 }

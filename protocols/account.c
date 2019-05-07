@@ -59,6 +59,9 @@ account_t *account_add(bee_t *bee, struct prpl *prpl, char *user, char *pass)
 
 	s = set_add(&a->set, "auto_reconnect", "true", set_eval_bool, a);
 
+	s = set_add(&a->set, "handle_unknown", NULL, NULL, a);
+	s->flags |= SET_NULL_OK;
+
 	s = set_add(&a->set, "nick_format", NULL, NULL, a);
 	s->flags |= SET_NULL_OK;
 
@@ -66,24 +69,23 @@ account_t *account_add(bee_t *bee, struct prpl *prpl, char *user, char *pass)
 	s->flags |= SET_NOSAVE; /* Just for bw compatibility! */
 
 	s = set_add(&a->set, "password", NULL, set_eval_account, a);
-	s->flags |= SET_NOSAVE | SET_NULL_OK | SET_PASSWORD;
+	s->flags |= SET_NOSAVE | SET_NULL_OK | SET_PASSWORD | ACC_SET_LOCKABLE;
 
 	s = set_add(&a->set, "tag", NULL, set_eval_account, a);
 	s->flags |= SET_NOSAVE;
 
 	s = set_add(&a->set, "username", NULL, set_eval_account, a);
-	s->flags |= SET_NOSAVE | ACC_SET_OFFLINE_ONLY;
+	s->flags |= SET_NOSAVE | ACC_SET_OFFLINE_ONLY | ACC_SET_LOCKABLE;
 	set_setstr(&a->set, "username", user);
+
+	if (prpl == &protocol_missing) {
+		s = set_add(&a->set, "server", NULL, set_eval_account, a);
+		s->flags |= SET_NOSAVE | SET_HIDDEN | ACC_SET_OFFLINE_ONLY | ACC_SET_ONLINE_ONLY;
+	}
 
 	/* Hardcode some more clever tag guesses. */
 	strcpy(tag, prpl->name);
-	if (strcmp(prpl->name, "oscar") == 0) {
-		if (g_ascii_isdigit(a->user[0])) {
-			strcpy(tag, "icq");
-		} else {
-			strcpy(tag, "aim");
-		}
-	} else if (strcmp(prpl->name, "jabber") == 0) {
+	if (strcmp(prpl->name, "jabber") == 0) {
 		if (strstr(a->user, "@gmail.com") ||
 		    strstr(a->user, "@googlemail.com")) {
 			strcpy(tag, "gtalk");

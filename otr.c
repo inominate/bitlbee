@@ -267,6 +267,22 @@ void init_plugin(void)
 	register_irc_plugin(&otr_plugin);
 }
 
+#ifndef OTR_BI
+struct plugin_info *init_plugin_info(void)
+{
+	static struct plugin_info info = {
+		BITLBEE_ABI_VERSION_CODE,
+		"otr",
+		BITLBEE_VERSION,
+		"Off-the-Record communication",
+		NULL,
+		NULL
+	};
+
+	return &info;
+}
+#endif
+
 gboolean otr_irc_new(irc_t *irc)
 {
 	set_t *s;
@@ -412,7 +428,7 @@ int otr_check_for_key(account_t *a)
 	OtrlPrivKey *k;
 
 	/* don't do OTR on certain (not classic IM) protocols, e.g. twitter */
-	if (a->prpl->options & OPT_NOOTR) {
+	if (a->prpl->options & PRPL_OPT_NOOTR) {
 		return 0;
 	}
 
@@ -440,7 +456,7 @@ char *otr_filter_msg_in(irc_user_t *iu, char *msg, int flags)
 	struct im_connection *ic = iu->bu->ic;
 
 	/* don't do OTR on certain (not classic IM) protocols, e.g. twitter */
-	if (ic->acc->prpl->options & OPT_NOOTR ||
+	if (ic->acc->prpl->options & PRPL_OPT_NOOTR ||
 	    iu->bu->flags & BEE_USER_NOOTR) {
 		return msg;
 	}
@@ -861,13 +877,13 @@ void op_handle_smp_event(void *opdata, OtrlSMPEvent ev, ConnContext *ctx,
 	switch (ev) {
 	case OTRL_SMPEVENT_ASK_FOR_SECRET:
 		irc_rootmsg(irc, "smp: initiated by %s"
-		            " - respond with \x02otr smp %s <secret>\x02",
+		            " - respond with \x02otr smp %s \"<secret>\"\x02",
 		            u->nick, u->nick);
 		break;
 	case OTRL_SMPEVENT_ASK_FOR_ANSWER:
 		irc_rootmsg(irc, "smp: initiated by %s with question: \x02\"%s\"\x02", u->nick,
 		            question);
-		irc_rootmsg(irc, "smp: respond with \x02otr smp %s <answer>\x02",
+		irc_rootmsg(irc, "smp: respond with \x02otr smp %s \"<answer>\"\x02",
 		            u->nick);
 		break;
 	case OTRL_SMPEVENT_CHEATED:
@@ -1040,10 +1056,6 @@ void cmd_otr_connect(irc_t *irc, char **args)
 	u = irc_user_by_name(irc, args[1]);
 	if (!u || !u->bu || !u->bu->ic) {
 		irc_rootmsg(irc, "%s: unknown user", args[1]);
-		return;
-	}
-	if (!(u->bu->flags & BEE_USER_ONLINE)) {
-		irc_rootmsg(irc, "%s is offline", args[1]);
 		return;
 	}
 
@@ -1383,6 +1395,7 @@ void log_otr_message(void *opdata, const char *fmt, ...)
 
 void display_otr_message(void *opdata, ConnContext *ctx, const char *fmt, ...)
 {
+	char *msg_, *msg;
 	struct im_connection *ic =
 	        check_imc(opdata, ctx->accountname, ctx->protocol);
 	irc_t *irc = ic->bee->ui_data;
@@ -1390,8 +1403,10 @@ void display_otr_message(void *opdata, ConnContext *ctx, const char *fmt, ...)
 	va_list va;
 
 	va_start(va, fmt);
-	char *msg = g_strdup_vprintf(fmt, va);
+	msg_ = g_strdup_vprintf(fmt, va);
 	va_end(va);
+
+	msg = word_wrap(msg_, IRC_WORD_WRAP);
 
 	if (u) {
 		/* just show this as a regular message */
@@ -1400,6 +1415,7 @@ void display_otr_message(void *opdata, ConnContext *ctx, const char *fmt, ...)
 		irc_rootmsg(irc, "[otr] %s", msg);
 	}
 
+	g_free(msg_);
 	g_free(msg);
 }
 
@@ -1414,10 +1430,6 @@ void otr_smp_or_smpq(irc_t *irc, const char *nick, const char *question,
 	u = irc_user_by_name(irc, nick);
 	if (!u || !u->bu || !u->bu->ic) {
 		irc_rootmsg(irc, "%s: unknown user", nick);
-		return;
-	}
-	if (!(u->bu->flags & BEE_USER_ONLINE)) {
-		irc_rootmsg(irc, "%s is offline", nick);
 		return;
 	}
 
@@ -1493,7 +1505,7 @@ struct im_connection *check_imc(void *opdata, const char *accountname,
 				break;
 			}
 		}
-		assert(l != NULL);  /* a match should always be found */
+		g_return_val_if_fail(l, NULL);
 		if (!l) {
 			return NULL;
 		}

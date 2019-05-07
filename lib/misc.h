@@ -28,6 +28,7 @@
 
 #include <gmodule.h>
 #include <time.h>
+#include <sys/socket.h>
 
 struct ns_srv_reply {
 	int prio;
@@ -129,9 +130,6 @@ G_MODULE_EXPORT char *escape_html(const char *html);
 G_MODULE_EXPORT void http_decode(char *s);
 G_MODULE_EXPORT void http_encode(char *s);
 
-G_MODULE_EXPORT char *ipv6_wrap(char *src);
-G_MODULE_EXPORT char *ipv6_unwrap(char *src);
-
 G_MODULE_EXPORT signed int do_iconv(char *from_cs, char *to_cs, char *src, char *dst, size_t size, size_t maxbuf);
 
 G_MODULE_EXPORT void random_bytes(unsigned char *buf, int count);
@@ -150,5 +148,9 @@ G_MODULE_EXPORT char *get_rfc822_header(const char *text, const char *header, in
 G_MODULE_EXPORT int truncate_utf8(char *string, int maxlen);
 G_MODULE_EXPORT gboolean parse_int64(char *string, int base, guint64 *number);
 G_MODULE_EXPORT char *str_reject_chars(char *string, const char *reject, char replacement);
+G_MODULE_EXPORT char *str_pad_and_truncate(const char *string, long char_len, const char *ellipsis);
+
+G_MODULE_EXPORT int b_istr_equal(gconstpointer v, gconstpointer v2);
+G_MODULE_EXPORT guint b_istr_hash(gconstpointer v);
 
 #endif

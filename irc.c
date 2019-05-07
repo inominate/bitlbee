@@ -24,6 +24,7 @@
 */
 
 #include "bitlbee.h"
+#include "canohost.h"
 #include "ipc.h"
 #include "dcc.h"
 #include "lib/ssl_client.h"
@@ -40,9 +41,6 @@ static char *set_eval_utf8_nicks(set_t *set, char *value);
 irc_t *irc_new(int fd)
 {
 	irc_t *irc;
-	struct sockaddr_storage sock;
-	socklen_t socklen = sizeof(sock);
-	char *host = NULL, *myhost = NULL;
 	irc_user_t *iu;
 	GSList *l;
 	set_t *s;
@@ -64,32 +62,7 @@ irc_t *irc_new(int fd)
 	irc->iconv = (GIConv) - 1;
 	irc->oconv = (GIConv) - 1;
 
-	if (global.conf->hostname) {
-		myhost = g_strdup(global.conf->hostname);
-	} else if (getsockname(irc->fd, (struct sockaddr*) &sock, &socklen) == 0) {
-		char buf[NI_MAXHOST + 1];
-
-		if (getnameinfo((struct sockaddr *) &sock, socklen, buf,
-		                NI_MAXHOST, NULL, 0, 0) == 0) {
-			myhost = g_strdup(ipv6_unwrap(buf));
-		}
-	}
-
-	if (getpeername(irc->fd, (struct sockaddr*) &sock, &socklen) == 0) {
-		char buf[NI_MAXHOST + 1];
-
-		if (getnameinfo((struct sockaddr *) &sock, socklen, buf,
-		                NI_MAXHOST, NULL, 0, 0) == 0) {
-			host = g_strdup(ipv6_unwrap(buf));
-		}
-	}
-
-	if (host == NULL) {
-		host = g_strdup("localhost.localdomain");
-	}
-	if (myhost == NULL) {
-		myhost = g_strdup("localhost.localdomain");
-	}
+	irc->sendbuffer = g_string_sized_new(IRC_MAX_LINE * 2);
 
 	if (global.conf->ping_interval > 0 && global.conf->ping_timeout > 0) {
 		irc->ping_source_id = b_timeout_add(global.conf->ping_interval * 1000, irc_userping, irc);
@@ -112,8 +85,9 @@ irc_t *irc_new(int fd)
 	s = set_add(&b->set, "handle_unknown", "add_channel", NULL, irc);
 	s = set_add(&b->set, "last_version", "0", NULL, irc);
 	s->flags |= SET_HIDDEN;
-	s = set_add(&b->set, "lcnicks", "true", set_eval_bool, irc);
 	s = set_add(&b->set, "nick_format", "%-@nick", NULL, irc);
+	s = set_add(&b->set, "nick_lowercase", "false", set_eval_bool, irc);
+	s = set_add(&b->set, "nick_underscores", "false", set_eval_bool, irc);
 	s = set_add(&b->set, "offline_user_quits", "true", set_eval_bool, irc);
 	s = set_add(&b->set, "ops", "both", set_eval_irc_channel_ops, irc);
 	s = set_add(&b->set, "paste_buffer", "false", set_eval_bool, irc);
@@ -136,17 +110,16 @@ irc_t *irc_new(int fd)
 	s = set_add(&b->set, "utf8_nicks", "false", set_eval_utf8_nicks, irc);
 
 	irc->root = iu = irc_user_new(irc, ROOT_NICK);
-	iu->host = g_strdup(myhost);
 	iu->fullname = g_strdup(ROOT_FN);
 	iu->f = &irc_user_root_funcs;
 
 	iu = irc_user_new(irc, NS_NICK);
-	iu->host = g_strdup(myhost);
 	iu->fullname = g_strdup(ROOT_FN);
 	iu->f = &irc_user_root_funcs;
 
 	irc->user = g_new0(irc_user_t, 1);
-	irc->user->host = g_strdup(host);
+	
+	irc_set_hosts(irc, NULL, 0);
 
 	conf_loaddefaults(irc);
 
@@ -157,13 +130,12 @@ irc_t *irc_new(int fd)
 	if (isatty(irc->fd)) {
 		irc_write(irc, ":%s NOTICE * :%s", irc->root->host,
 		          "If you read this, you most likely accidentally "
-		          "started BitlBee in inetd mode on the command line. "
-		          "You probably want to run it in (Fork)Daemon mode. "
-		          "See doc/README for more information.");
+		          "started BitlBee in inetd mode on the command line.");
+		irc_write(irc, ":%s NOTICE * :%s", irc->root->host,
+		          "You probably want to run it as a system service, "
+		          "or use (Fork)Daemon mode with the -F or -D switches. "
+		          "See doc/README or 'man bitlbee' for more information.");
 	}
-
-	g_free(myhost);
-	g_free(host);
 
 	/* libpurple doesn't like fork()s after initializing itself, so this
 	   is the right moment to initialize it. */
@@ -184,6 +156,52 @@ irc_t *irc_new(int fd)
 	}
 
 	return irc;
+}
+
+void irc_set_hosts(irc_t *irc, const struct sockaddr *remote_addr, const socklen_t remote_addrlen)
+{
+	struct sockaddr_storage sock;
+	socklen_t socklen = sizeof(sock);
+	char *host = NULL, *myhost = NULL;
+	struct irc_user *iu;
+
+	if (global.conf->hostname) {
+		myhost = g_strdup(global.conf->hostname);
+	} else if (getsockname(irc->fd, (struct sockaddr*) &sock, &socklen) == 0) {
+		myhost = reverse_lookup((struct sockaddr*) &sock, socklen);
+	}
+
+	if (remote_addrlen > 0) {
+		host = reverse_lookup(remote_addr, remote_addrlen);
+	} else if (getpeername(irc->fd, (struct sockaddr*) &sock, &socklen) == 0) {
+		host = reverse_lookup((struct sockaddr*) &sock, socklen);
+	}
+
+	if (myhost == NULL) {
+		myhost = g_strdup("localhost.localdomain");
+	}
+	if (host == NULL) {
+		host = g_strdup("localhost.localdomain");
+	}
+	
+	if (irc->root->host != irc->root->nick) {
+		g_free(irc->root->host);
+	}
+	irc->root->host = g_strdup(myhost);
+	if ((iu = irc_user_by_name(irc, NS_NICK))) {
+		if (iu->host != iu->nick) {
+			g_free(iu->host);
+		}
+		iu->host = g_strdup(myhost);
+	}
+	
+	if (irc->user->host != irc->user->nick) {
+		g_free(irc->user->host);
+	}
+	irc->user->host = g_strdup(host);
+
+	g_free(myhost);
+	g_free(host);
 }
 
 /* immed=1 makes this function pretty much equal to irc_free(), except that
@@ -225,6 +243,8 @@ static gboolean irc_free_hashkey(gpointer key, gpointer value, gpointer data);
 void irc_free(irc_t * irc)
 {
 	GSList *l;
+	GHashTableIter iter;
+	gpointer itervalue;
 
 	irc->status |= USTATUS_SHUTDOWN;
 
@@ -254,8 +274,11 @@ void irc_free(irc_t * irc)
 	   before we clear the remaining ones ourselves. */
 	bee_free(irc->b);
 
-	while (irc->users) {
-		irc_user_free(irc, (irc_user_t *) irc->users->data);
+	g_hash_table_iter_init(&iter, irc->nick_user_hash);
+
+	while (g_hash_table_iter_next(&iter, NULL, &itervalue)) {
+		g_hash_table_iter_remove(&iter);
+		irc_user_free(irc, (irc_user_t *) itervalue);
 	}
 
 	while (irc->channels) {
@@ -275,7 +298,6 @@ void irc_free(irc_t * irc)
 	closesocket(irc->fd);
 	irc->fd = -1;
 
-	g_hash_table_foreach_remove(irc->nick_user_hash, irc_free_hashkey, NULL);
 	g_hash_table_destroy(irc->nick_user_hash);
 
 	g_hash_table_foreach_remove(irc->watches, irc_free_hashkey, NULL);
@@ -288,7 +310,7 @@ void irc_free(irc_t * irc)
 		g_iconv_close(irc->oconv);
 	}
 
-	g_free(irc->sendbuffer);
+	g_string_free(irc->sendbuffer, TRUE);
 	g_free(irc->readbuffer);
 	g_free(irc->password);
 
@@ -578,8 +600,7 @@ void irc_write_all(int now, char *format, ...)
 		irc_t *irc = temp->data;
 
 		if (now) {
-			g_free(irc->sendbuffer);
-			irc->sendbuffer = g_strdup("\r\n");
+			g_string_assign(irc->sendbuffer, "\r\n");
 		}
 		irc_vawrite(temp->data, format, params);
 		if (now) {
@@ -594,7 +615,6 @@ void irc_write_all(int now, char *format, ...)
 
 void irc_vawrite(irc_t *irc, char *format, va_list params)
 {
-	int size;
 	char line[IRC_MAX_LINE + 1];
 
 	/* Don't try to write anything new anymore when shutting down. */
@@ -621,13 +641,7 @@ void irc_vawrite(irc_t *irc, char *format, va_list params)
 	}
 	g_strlcat(line, "\r\n", IRC_MAX_LINE + 1);
 
-	if (irc->sendbuffer != NULL) {
-		size = strlen(irc->sendbuffer) + strlen(line);
-		irc->sendbuffer = g_renew(char, irc->sendbuffer, size + 1);
-		strcpy((irc->sendbuffer + strlen(irc->sendbuffer)), line);
-	} else {
-		irc->sendbuffer = g_strdup(line);
-	}
+	g_string_append(irc->sendbuffer, line);
 
 	if (irc->w_watch_source_id == 0) {
 		/* If the buffer is empty we can probably write, so call the write event handler
@@ -649,23 +663,19 @@ void irc_vawrite(irc_t *irc, char *format, va_list params)
 void irc_flush(irc_t *irc)
 {
 	ssize_t n;
-	size_t len;
+	size_t len = irc->sendbuffer->len;
 
-	if (irc->sendbuffer == NULL) {
+	if (len == 0) {
 		return;
 	}
 
-	len = strlen(irc->sendbuffer);
-	if ((n = send(irc->fd, irc->sendbuffer, len, 0)) == len) {
-		g_free(irc->sendbuffer);
-		irc->sendbuffer = NULL;
+	if ((n = send(irc->fd, irc->sendbuffer->str, len, 0)) == len) {
+		g_string_truncate(irc->sendbuffer, 0);
 
 		b_event_remove(irc->w_watch_source_id);
 		irc->w_watch_source_id = 0;
 	} else if (n > 0) {
-		char *s = g_strdup(irc->sendbuffer + n);
-		g_free(irc->sendbuffer);
-		irc->sendbuffer = s;
+		g_string_erase(irc->sendbuffer, 0, n);
 	}
 	/* Otherwise something went wrong and we don't currently care
 	   what the error was. We may or may not succeed later, we
@@ -682,8 +692,7 @@ void irc_switch_fd(irc_t *irc, int fd)
 	if (irc->sendbuffer) {
 		b_event_remove(irc->w_watch_source_id);
 		irc->w_watch_source_id = 0;
-		g_free(irc->sendbuffer);
-		irc->sendbuffer = NULL;
+		g_string_truncate(irc->sendbuffer, 0);
 	}
 
 	b_event_remove(irc->r_watch_source_id);

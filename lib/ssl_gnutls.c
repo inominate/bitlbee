@@ -41,12 +41,6 @@ gnutls_certificate_credentials_t xcred;
 
 #include <limits.h>
 
-#if defined(ULONG_MAX) && ULONG_MAX > 4294967295UL
-#define GNUTLS_STUPID_CAST (long)
-#else
-#define GNUTLS_STUPID_CAST (int)
-#endif
-
 #define SSLDEBUG 0
 
 struct scd {
@@ -328,13 +322,13 @@ static gboolean ssl_connected(gpointer data, gint source, b_input_condition cond
 #endif
 	gnutls_set_default_priority(conn->session);
 	gnutls_credentials_set(conn->session, GNUTLS_CRD_CERTIFICATE, xcred);
-	if (conn->hostname && !g_ascii_isdigit(conn->hostname[0])) {
+	if (conn->hostname && !g_hostname_is_ip_address(conn->hostname)) {
 		gnutls_server_name_set(conn->session, GNUTLS_NAME_DNS,
 		                       conn->hostname, strlen(conn->hostname));
 	}
 
 	sock_make_nonblocking(conn->fd);
-	gnutls_transport_set_ptr(conn->session, (gnutls_transport_ptr_t) GNUTLS_STUPID_CAST conn->fd);
+	gnutls_transport_set_ptr(conn->session, (gnutls_transport_ptr_t) (long) conn->fd);
 
 	ssl_cache_resume(conn);
 

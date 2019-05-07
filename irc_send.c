@@ -40,8 +40,8 @@ void irc_send_num(irc_t *irc, int code, char *format, ...)
 void irc_send_login(irc_t *irc)
 {
 	irc_send_num(irc,   1, ":Welcome to the %s gateway, %s", PACKAGE, irc->user->nick);
-	irc_send_num(irc,   2, ":Host %s is running %s %s %s/%s.", irc->root->host,
-	             PACKAGE, BITLBEE_VERSION, ARCH, CPU);
+	irc_send_num(irc,   2, ":Host %s is running %s %s.", irc->root->host,
+	             PACKAGE, BITLBEE_VERSION);
 	irc_send_num(irc,   3, ":%s", IRCD_INFO);
 	irc_send_num(irc,   4, "%s %s %s %s", irc->root->host, BITLBEE_VERSION, UMODES UMODES_PRIV, CMODES);
 	irc_send_num(irc,   5, "PREFIX=(ohv)@%%+ CHANTYPES=%s CHANMODES=,,,%s NICKLEN=%d CHANNELLEN=%d "
@@ -53,19 +53,18 @@ void irc_send_login(irc_t *irc)
 
 void irc_send_motd(irc_t *irc)
 {
-	char motd[2048];
-	ssize_t len;
-	int fd;
+	char *motd;
+	size_t len;
 
-	fd = open(global.conf->motdfile, O_RDONLY);
-	if (fd == -1 || (len = read(fd, motd, sizeof(motd) - 1)) <= 0) {
+	g_file_get_contents(global.conf->motdfile, &motd, &len, NULL);
+
+	if (!motd || !len) {
 		irc_send_num(irc, 422, ":We don't need MOTDs.");
 	} else {
 		char linebuf[80];
 		char *add = "", max, *in;
 
 		in = motd;
-		motd[len] = '\0';
 		linebuf[79] = len = 0;
 		max = sizeof(linebuf) - 1;
 
@@ -100,9 +99,8 @@ void irc_send_motd(irc_t *irc)
 		irc_send_num(irc, 376, ":End of MOTD");
 	}
 
-	if (fd != -1) {
-		close(fd);
-	}
+	g_free(motd);
+
 }
 
 /* Used by some funcs that generate PRIVMSGs to figure out if we're talking to
@@ -347,8 +345,13 @@ void irc_send_who(irc_t *irc, GSList *l, const char *channel)
 			iu = l->data;
 		}
 
-		/* rfc1459 doesn't mention this: G means gone, H means here */
-		status_prefix[0] = iu->flags & IRC_USER_AWAY ? 'G' : 'H';
+		/* If this is the account nick, check configuration to see if away */
+		if (iu == irc->user) {
+			/* rfc1459 doesn't mention this: G means gone, H means here */
+			status_prefix[0] = set_getstr(&irc->b->set, "away") ? 'G' : 'H';
+		} else {
+			status_prefix[0] = iu->flags & IRC_USER_AWAY ? 'G' : 'H';
+		}
 
 		irc_send_num(irc, 352, "%s %s %s %s %s %s :0 %s",
 		             is_channel ? channel : "*", iu->user, iu->host, irc->root->host,
@@ -361,9 +364,19 @@ void irc_send_who(irc_t *irc, GSList *l, const char *channel)
 
 void irc_send_msg(irc_user_t *iu, const char *type, const char *dst, const char *msg, const char *prefix)
 {
+	irc_send_msg_ts(iu, type, dst, msg, prefix, 0);
+}
+
+void irc_send_msg_ts(irc_user_t *iu, const char *type, const char *dst, const char *msg, const char *prefix, time_t ts)
+{
 	char last = 0;
 	const char *s = msg, *line = msg;
+	char *tags = NULL;
 	char raw_msg[strlen(msg) + 1024];
+
+	if (!(iu->irc->caps & CAP_SERVER_TIME)) {
+		ts = 0;
+	}
 
 	while (!last) {
 		if (*s == '\r' && *(s + 1) == '\n') {
@@ -375,19 +388,25 @@ void irc_send_msg(irc_user_t *iu, const char *type, const char *dst, const char 
 			last = s[0] == 0;
 		}
 		if (*s == 0 || *s == '\n') {
+			if (ts) {
+				tags = irc_format_servertime(iu->irc, ts);
+			}
 			if (g_strncasecmp(line, "/me ", 4) == 0 && (!prefix || !*prefix) &&
 			    g_strcasecmp(type, "PRIVMSG") == 0) {
 				strcpy(raw_msg, "\001ACTION ");
 				strncat(raw_msg, line + 4, s - line - 4);
 				strcat(raw_msg, "\001");
-				irc_send_msg_raw(iu, type, dst, raw_msg);
+				irc_send_msg_raw_tags(iu, type, dst, tags, raw_msg);
 			} else {
 				*raw_msg = '\0';
 				if (prefix && *prefix) {
 					strcpy(raw_msg, prefix);
 				}
 				strncat(raw_msg, line, s - line);
-				irc_send_msg_raw(iu, type, dst, raw_msg);
+				irc_send_msg_raw_tags(iu, type, dst, tags, raw_msg);
+			}
+			if (ts) {
+				g_free(tags);
 			}
 			line = s + 1;
 		}
@@ -396,6 +415,11 @@ void irc_send_msg(irc_user_t *iu, const char *type, const char *dst, const char 
 }
 
 void irc_send_msg_raw(irc_user_t *iu, const char *type, const char *dst, const char *msg)
+{
+	irc_send_msg_raw_tags(iu, type, dst, NULL, msg);
+}
+
+void irc_send_msg_raw_tags(irc_user_t *iu, const char *type, const char *dst, const char* tags, const char *msg)
 {
 	char *fixhost;
 	int x;
@@ -406,8 +430,8 @@ void irc_send_msg_raw(irc_user_t *iu, const char *type, const char *dst, const c
 			fixhost[x] = '_';
 	}
 
-	irc_write( iu->irc, ":%s!%s@%s %s %s :%s",
-	           iu->nick, iu->user, fixhost, type, dst, msg && *msg ? msg : " " );
+	irc_write(iu->irc, "%s%s:%s!%s@%s %s %s :%s",
+	          tags ? tags : "", tags ? " " : "", iu->nick, iu->user, iu->host, type, dst, msg && *msg ? msg : " ");
 
 	g_free(fixhost);
 }

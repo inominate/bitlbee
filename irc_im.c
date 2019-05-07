@@ -88,11 +88,12 @@ static gboolean bee_irc_user_new(bee_t *bee, bee_user_t *bu)
 	str_reject_chars(iu->host, " ", '_');
 
 	if (bu->flags & BEE_USER_LOCAL) {
-		char *s = set_getstr(&bee->set, "handle_unknown");
+		char *s = set_getstr(&bu->ic->acc->set, "handle_unknown") ? :
+		          set_getstr(&bee->set, "handle_unknown");
 
-		if (strcmp(s, "add_private") == 0) {
+		if (g_strcasecmp(s, "add_private") == 0) {
 			iu->last_channel = NULL;
-		} else if (strcmp(s, "add_channel") == 0) {
+		} else if (g_strcasecmp(s, "add_channel") == 0) {
 			iu->last_channel = irc->default_channel;
 		}
 	}
@@ -119,10 +120,11 @@ static gboolean bee_irc_user_status(bee_t *bee, bee_user_t *bu, bee_user_t *old)
 		iu->flags |= IRC_USER_AWAY;
 	}
 
-	if ((irc->caps & CAP_AWAY_NOTIFY) &&
-	    ((bu->flags & BEE_USER_AWAY) != (old->flags & BEE_USER_AWAY) ||
-	     (bu->flags & BEE_USER_ONLINE) != (old->flags & BEE_USER_ONLINE))) {
-		irc_send_away_notify(iu);
+	/* return early if nothing changed */
+	if ((bu->flags == old->flags) &&
+	    (g_strcmp0(bu->status, old->status) == 0) &&
+	    (g_strcmp0(bu->status_msg, old->status_msg) == 0)) {
+		return TRUE;
 	}
 
 	if ((bu->flags & BEE_USER_ONLINE) != (old->flags & BEE_USER_ONLINE)) {
@@ -148,10 +150,13 @@ static gboolean bee_irc_user_status(bee_t *bee, bee_user_t *bu, bee_user_t *old)
 		}
 	}
 
-	/* Reset this one since the info may have changed. */
 	iu->away_reply_timeout = 0;
 
 	bee_irc_channel_update(irc, NULL, iu);
+
+	if (irc->caps & CAP_AWAY_NOTIFY) {
+		irc_send_away_notify(iu);
+	}
 
 	return TRUE;
 }
@@ -172,10 +177,14 @@ void bee_irc_channel_update(irc_t *irc, irc_channel_t *ic, irc_user_t *iu)
 		return;
 	}
 	if (iu == NULL) {
-		for (l = irc->users; l; l = l->next) {
-			iu = l->data;
+		GHashTableIter iter;
+		gpointer itervalue;
+		g_hash_table_iter_init(&iter, irc->nick_user_hash);
+
+		while (g_hash_table_iter_next(&iter, NULL, &itervalue)) {
+			iu = itervalue;
 			if (iu->bu) {
-				bee_irc_channel_update(irc, ic, l->data);
+				bee_irc_channel_update(irc, ic, iu);
 			}
 		}
 		return;
@@ -219,7 +228,9 @@ static gboolean bee_irc_user_msg(bee_t *bee, bee_user_t *bu, const char *msg_, g
 	char *message_type = "PRIVMSG";
 	GSList *l;
 
-	if (sent_at > 0 && set_getbool(&irc->b->set, "display_timestamps")) {
+	if (sent_at > 0 &&
+	    !(irc->caps & CAP_SERVER_TIME) &&
+	    set_getbool(&irc->b->set, "display_timestamps")) {
 		ts = irc_format_timestamp(irc, sent_at);
 	}
 
@@ -291,8 +302,8 @@ static gboolean bee_irc_user_msg(bee_t *bee, bee_user_t *bu, const char *msg_, g
 		msg = s;
 	}
 
-	wrapped = word_wrap(msg, 425);
-	irc_send_msg(src_iu, message_type, dst, wrapped, prefix);
+	wrapped = word_wrap(msg, IRC_WORD_WRAP);
+	irc_send_msg_ts(src_iu, message_type, dst, wrapped, prefix, sent_at);
 	g_free(wrapped);
 
 cleanup:
@@ -341,7 +352,7 @@ static gboolean bee_irc_user_action_response(bee_t *bee, bee_user_t *bu, const c
 	return TRUE;
 }
 
-static gboolean bee_irc_user_nick_update(irc_user_t *iu);
+static gboolean bee_irc_user_nick_update(irc_user_t *iu, gboolean offline_only);
 
 static gboolean bee_irc_user_fullname(bee_t *bee, bee_user_t *bu)
 {
@@ -369,14 +380,21 @@ static gboolean bee_irc_user_fullname(bee_t *bee, bee_user_t *bu)
 		imcb_log(bu->ic, "User `%s' changed name to `%s'", iu->nick, iu->fullname);
 	}
 
-	bee_irc_user_nick_update(iu);
+	bee_irc_user_nick_update(iu, TRUE);
 
 	return TRUE;
 }
 
 static gboolean bee_irc_user_nick_hint(bee_t *bee, bee_user_t *bu, const char *hint)
 {
-	bee_irc_user_nick_update((irc_user_t *) bu->ui_data);
+	bee_irc_user_nick_update((irc_user_t *) bu->ui_data, TRUE);
+
+	return TRUE;
+}
+
+static gboolean bee_irc_user_nick_change(bee_t *bee, bee_user_t *bu, const char *nick)
+{
+	bee_irc_user_nick_update((irc_user_t *) bu->ui_data, FALSE);
 
 	return TRUE;
 }
@@ -385,30 +403,19 @@ static gboolean bee_irc_user_group(bee_t *bee, bee_user_t *bu)
 {
 	irc_user_t *iu = (irc_user_t *) bu->ui_data;
 	irc_t *irc = (irc_t *) bee->ui_data;
-	bee_user_flags_t online;
-
-	/* Take the user offline temporarily so we can change the nick (if necessary). */
-	if ((online = bu->flags & BEE_USER_ONLINE)) {
-		bu->flags &= ~BEE_USER_ONLINE;
-	}
 
 	bee_irc_channel_update(irc, NULL, iu);
-	bee_irc_user_nick_update(iu);
-
-	if (online) {
-		bu->flags |= online;
-		bee_irc_channel_update(irc, NULL, iu);
-	}
+	bee_irc_user_nick_update(iu, FALSE);
 
 	return TRUE;
 }
 
-static gboolean bee_irc_user_nick_update(irc_user_t *iu)
+static gboolean bee_irc_user_nick_update(irc_user_t *iu, gboolean offline_only)
 {
 	bee_user_t *bu = iu->bu;
 	char *newnick;
 
-	if (bu->flags & BEE_USER_ONLINE) {
+	if (offline_only && bu->flags & BEE_USER_ONLINE) {
 		/* Ignore if the user is visible already. */
 		return TRUE;
 	}
@@ -431,21 +438,43 @@ static gboolean bee_irc_user_nick_update(irc_user_t *iu)
 void bee_irc_user_nick_reset(irc_user_t *iu)
 {
 	bee_user_t *bu = iu->bu;
-	bee_user_flags_t online;
 
 	if (bu == FALSE) {
 		return;
 	}
 
-	/* In this case, pretend the user is offline. */
-	if ((online = bu->flags & BEE_USER_ONLINE)) {
-		bu->flags &= ~BEE_USER_ONLINE;
+	nick_del(bu);
+	bee_irc_user_nick_update(iu, FALSE);
+
+}
+
+#define PASTEBUF_LONG_SPACELESS_LINE_LENGTH 350
+
+/* Returns FALSE if the last line of the message is near the typical irc length
+ * limit and the message has no spaces, indicating that it's probably desirable
+ * to join messages without the newline.
+ *
+ * The main use case for this is pasting long URLs and not breaking them */
+static gboolean bee_irc_pastebuf_should_start_with_newline(const char *msg)
+{
+	int i;
+	const char *last_line = strrchr(msg, '\n') ? : msg;
+
+	if (*last_line == '\n') {
+		last_line++;
 	}
 
-	nick_del(bu);
-	bee_irc_user_nick_update(iu);
+	for (i = 0; last_line[i]; i++) {
+		if (g_ascii_isspace(last_line[i])) {
+			return TRUE;
+		}
+	}
 
-	bu->flags |= online;
+	if (i < PASTEBUF_LONG_SPACELESS_LINE_LENGTH) {
+		return TRUE;
+	}
+
+	return FALSE;
 }
 
 /* IRC->IM calls */
@@ -460,7 +489,8 @@ static gboolean bee_irc_user_privmsg(irc_user_t *iu, const char *msg)
 		return FALSE;
 	}
 
-	if ((away = irc_user_get_away(iu)) &&
+	if (iu->last_channel == NULL &&
+	    (away = irc_user_get_away(iu)) &&
 	    time(NULL) >= iu->away_reply_timeout) {
 		irc_send_num(iu->irc, 301, "%s :%s", iu->nick, away);
 		iu->away_reply_timeout = time(NULL) +
@@ -471,7 +501,10 @@ static gboolean bee_irc_user_privmsg(irc_user_t *iu, const char *msg)
 		iu->pastebuf = g_string_new(msg);
 	} else {
 		b_event_remove(iu->pastebuf_timer);
-		g_string_append_printf(iu->pastebuf, "\n%s", msg);
+		if (bee_irc_pastebuf_should_start_with_newline(iu->pastebuf->str)) {
+			g_string_append_c(iu->pastebuf, '\n');
+		}
+		g_string_append(iu->pastebuf, msg);
 	}
 
 	if (set_getbool(&iu->irc->b->set, "paste_buffer")) {
@@ -636,10 +669,6 @@ static gboolean bee_irc_chat_free(bee_t *bee, struct groupchat *c)
 		return FALSE;
 	}
 
-	if (ic->flags & IRC_CHANNEL_JOINED) {
-		irc_channel_printf(ic, "Cleaning up channel, bye!");
-	}
-
 	ic->data = NULL;
 	c->ui_data = NULL;
 	irc_channel_del_user(ic, ic->irc->user, IRC_CDU_KICK, "Chatroom closed by server");
@@ -671,12 +700,14 @@ static gboolean bee_irc_chat_msg(bee_t *bee, struct groupchat *c, bee_user_t *bu
 		return FALSE;
 	}
 
-	if (sent_at > 0 && set_getbool(&bee->set, "display_timestamps")) {
+	if (sent_at > 0 &&
+	    !(irc->caps & CAP_SERVER_TIME) &&
+	    set_getbool(&bee->set, "display_timestamps")) {
 		ts = irc_format_timestamp(irc, sent_at);
 	}
 
-	wrapped = word_wrap(msg, 425);
-	irc_send_msg(iu, "PRIVMSG", ic->name, wrapped, ts);
+	wrapped = word_wrap(msg, IRC_WORD_WRAP);
+	irc_send_msg_ts(iu, "PRIVMSG", ic->name, wrapped, ts, sent_at);
 	g_free(ts);
 	g_free(wrapped);
 
@@ -1016,7 +1047,7 @@ static char *set_eval_room_account(set_t *set, char *value)
 
 	if (!(acc = account_get(ic->irc->b, value))) {
 		return SET_INVALID;
-	} else if (!acc->prpl->chat_join) {
+	} else if (!acc->prpl->chat_join && acc->prpl != &protocol_missing) {
 		irc_rootmsg(ic->irc, "Named chatrooms not supported on that account.");
 		return SET_INVALID;
 	}
@@ -1145,4 +1176,5 @@ const struct bee_ui_funcs irc_ui_funcs = {
 	bee_irc_ft_finished,
 
 	bee_irc_log,
+	bee_irc_user_nick_change,
 };
